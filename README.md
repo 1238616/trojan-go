@@ -1,292 +1,273 @@
-# Trojan-Go [![Go Report Card](https://goreportcard.com/badge/github.com/p4gefau1t/trojan-go)](https://goreportcard.com/report/github.com/p4gefau1t/trojan-go) [![Downloads](https://img.shields.io/github/downloads/p4gefau1t/trojan-go/total?label=downloads&logo=github&style=flat-square)](https://img.shields.io/github/downloads/p4gefau1t/trojan-go/total?label=downloads&logo=github&style=flat-square)
+# Trojan-Go
 
 使用 Go 实现的完整 Trojan 代理，兼容原版 Trojan 协议及配置文件格式。安全、高效、轻巧、易用。
 
-Trojan-Go 支持[多路复用](#多路复用)提升并发性能；使用[路由模块](#路由模块)实现国内外分流；支持 [CDN 流量中转](#Websocket)(基于 WebSocket over TLS)；支持使用 AEAD 对 Trojan 流量进行[二次加密](#aead-加密)(基于 Shadowsocks AEAD)；支持可插拔的[传输层插件](#传输层插件)，允许替换 TLS，使用其他加密隧道传输 Trojan 协议流量。
+Trojan-Go 支持[多路复用](#多路复用)提升并发性能；使用[路由模块](#路由模块)实现国内外分流；支持 [CDN 流量中转](#websocket)(基于 WebSocket over TLS)；支持使用 AEAD 对 Trojan 流量进行[二次加密](#aead-加密)(基于 Shadowsocks AEAD)；支持可插拔的[传输层插件](#传输层插件)，允许替换 TLS，使用其他加密隧道传输 Trojan 协议流量。
 
-预编译二进制可执行文件可在 [Release 页面](https://github.com/p4gefau1t/trojan-go/releases)下载。解压后即可直接运行，无其他组件依赖。
+预编译二进制可执行文件可在 [Release 页面](https://github.com/1238616/trojan-go/releases) 下载。解压后即可直接运行，无其他组件依赖。
 
-如遇到配置和使用问题、发现 bug，或是有更好的想法，欢迎加入 [Telegram 交流反馈群](https://t.me/trojan_go_chat)。
+## 目录
 
-## 简介
+- [功能概览](#功能概览)
+- [架构设计](#架构设计)
+- [项目结构](#项目结构)
+- [使用方法](#使用方法)
+- [配置说明](#配置说明)
+- [特性详解](#特性详解)
+  - [WebSocket CDN 中转](#websocket)
+  - [多路复用 (smux / sing-mux)](#多路复用)
+  - [路由模块](#路由模块)
+  - [AEAD 二次加密](#aead-加密)
+  - [传输层插件](#传输层插件)
+  - [连接监控与流量仪表盘](#连接监控与流量仪表盘)
+  - [Prometheus 指标导出](#prometheus-抓取)
+  - [零拷贝 splice 加速](#零拷贝-splice-加速)
+  - [集群出口优选](#集群出口优选)
+  - [调试性能分析器](#调试性能分析器)
+  - [运行时调优参数](#运行时调优参数)
+- [sing-mux 兼容](#sing-mux-兼容shadowrocket--sing-box-mux-支持)
+- [构建](#构建)
+- [致谢](#致谢)
 
-**完整介绍和配置教程，参见 [Trojan-Go 文档](https://p4gefau1t.github.io/trojan-go)。**
+## 功能概览
 
-Trojan-Go 兼容原版 Trojan 的绝大多数功能，包括但不限于：
+### 兼容原版 Trojan
 
 - TLS 隧道传输
-- UDP 代理
-- 透明代理 (NAT 模式，iptables 设置参考[这里](https://github.com/shadowsocks/shadowsocks-libev/tree/v3.3.1#transparent-proxy))
-- 对抗 GFW 被动检测 / 主动检测的机制
-- MySQL 数据持久化方案
-- MySQL 用户权限认证
+- TCP / UDP 代理
+- 透明代理（NAT 模式，基于 iptables）
+- 对抗 GFW 被动检测 / 主动检测
+- MySQL 数据持久化与用户权限认证
 - 用户流量统计和配额限制
 
-同时，Trojan-Go 还扩展实现了更多高效易用的功能特性：
+### 扩展特性
 
-- 便于快速部署的「简易模式」
-- Socks5 / HTTP 代理自动适配
-- 基于 TProxy 的透明代理（TCP / UDP）
-- 全平台支持，无特殊依赖
-- 基于多路复用（smux）降低延迟，提升并发性能
-- 自定义路由模块，可实现国内外分流 / 广告屏蔽等功能
-- Websocket 传输支持，以实现 CDN 流量中转（基于 WebSocket over TLS）和对抗 GFW 中间人攻击
-- TLS 指纹伪造，以对抗 GFW 针对 TLS Client Hello 的特征识别
-- 基于 gRPC 的 API 支持，以实现用户管理和速度限制等
-- **实时连接监控与流量仪表盘**，支持 REST API 与 Web UI，可查看每连接速率、15 分钟流量历史曲线
-- **Prometheus 指标导出**，支持外部 Prometheus 抓取，涵盖连接生命周期、吞吐量百分位、TLS 握手、多路复用、splice 零拷贝、TCP RTT/CWND、按用户/按目标统计等 60+ 指标
-- **零拷贝 splice(2) 加速**（仅 Linux），自动对纯 TCP 连接使用内核 splice 转发，避免用户态拷贝，非 TCP 连接自动回退
-- **多节点集群出口优选**，支持配置多个 peer 节点，自动探测延迟并选择最优出口，降低高延迟目标的访问时延
-- 可插拔传输层，可将 TLS 替换为其他协议或明文传输，同时有完整的 Shadowsocks 混淆插件支持
-- 支持对用户更友好的 YAML 配置文件格式
+| 特性 | 说明 |
+|------|------|
+| 简易模式 | 通过命令行参数快速启动服务端/客户端，无需配置文件 |
+| Socks5 / HTTP 自动适配 | 客户端本地监听自动识别 Socks5 和 HTTP 代理协议 |
+| TProxy 透明代理 | 基于 TProxy 的 TCP / UDP 透明代理（Linux） |
+| 多路复用 (smux) | 通过一条 TLS 隧道承载多条 TCP 连接，降低延迟 |
+| sing-mux 兼容 | 支持 Shadowrocket / sing-box 客户端的 Mux 协议（smux / yamux） |
+| 路由模块 | 基于 GeoIP / GeoSite 规则实现国内外分流 / 广告屏蔽 |
+| WebSocket 传输 | 基于 WebSocket over TLS 实现 CDN 流量中转 |
+| TLS 指纹伪造 | 基于 uTLS 对抗 GFW 针对 TLS Client Hello 的特征识别 |
+| AEAD 二次加密 | 基于 Shadowsocks AEAD 对 Trojan 流量二次加密 |
+| gRPC API | 用户管理、速度限制等管理接口 |
+| 连接监控仪表盘 | 内嵌 Web UI，实时查看连接速率、流量历史曲线 |
+| Prometheus 指标 | 60+ 指标导出，涵盖连接生命周期、吞吐量、TLS、splice 等 |
+| 零拷贝 splice(2) | Linux 下自动对纯 TCP 连接使用内核 splice 转发 |
+| 集群出口优选 | 多节点自动延迟探测，选择最优出口降低访问时延 |
+| 可插拔传输层 | 支持 Shadowsocks SIP003 标准混淆插件 |
+| YAML 配置 | 同时支持 JSON 和 YAML 配置文件格式 |
+| 全平台支持 | 交叉编译支持 Linux / macOS / Windows / FreeBSD，20+ 平台目标 |
 
-## 图形界面客户端
+## 架构设计
 
-Trojan-Go 服务端兼容所有原 Trojan 客户端，如 Igniter、ShadowRocket 等。以下是支持 Trojan-Go 扩展特性（Websocket / Mux 等）的客户端：
+Trojan-Go 采用**可组合隧道栈 (Composable Tunnel Stack)** 架构。每一层协议实现统一的 `Tunnel` 接口，可以按任意顺序组合叠加。
 
-- [Qv2ray](https://github.com/Qv2ray/Qv2ray)：跨平台客户端，支持 Windows / macOS / Linux，使用 Trojan-Go 核心，支持所有 Trojan-Go 扩展特性。
-- [Igniter-Go](https://github.com/p4gefau1t/trojan-go-android)：Android 客户端，Fork 自 Igniter，将 Igniter 核心替换为 Trojan-Go 并做了一定修改，支持所有 Trojan-Go 扩展特性。
+### 核心接口
+
+```
+tunnel.Conn        — TCP 连接抽象
+tunnel.PacketConn  — UDP 数据包流抽象
+tunnel.Client      — 隧道客户端（Dial 方向）
+tunnel.Server      — 隧道服务端（Accept 方向）
+tunnel.Tunnel      — 协议层工厂，负责在底层隧道之上创建上层客户端/服务端
+```
+
+### 数据流路径
+
+**客户端：**
+
+```
+用户应用
+  ↓ Socks5 / HTTP
+[Adapter] → [Transport(TCP)] → [TLS/uTLS] → [WebSocket](可选)
+  → [Shadowsocks AEAD](可选) → [Trojan 协议] → [Mux](可选)
+  → [SimpleSOCKS] → [Router] → [Freedom] → 目标服务器
+```
+
+**服务端：**
+
+```
+客户端连接
+  ↓
+[Transport(TCP)] → [TLS] → [WebSocket](可选)
+  → [Shadowsocks AEAD](可选) → [Trojan 协议认证]
+  → [Mux / SingMux / MuxCool](可选) → [SimpleSOCKS]
+  → [Freedom] → 目标服务器
+                  ↓ (可选)
+            [Cluster Router → Peer 节点中继]
+```
+
+### 代理引擎
+
+`Proxy` 是核心中继引擎，负责在 `sources`（入站 Server 列表）和 `sink`（出站 Client）之间双向转发数据：
+
+- `relayConnLoop()` — TCP 连接中继，支持 splice 零拷贝快速路径
+- `relayPacketLoop()` — UDP 数据包中继，使用缓冲区池减少 GC 压力
+- 可选挂载 `ClusterRouter`（集群路由）、`Profiler`（调试分析器）、`ConnMonitor`（连接监控）
+
+## 项目结构
+
+```
+trojan-go/
+├── main.go                  # 程序入口，解析命令行参数并分发到选项处理器
+├── go.mod                   # Go 模块定义（Go 1.19+）
+├── Makefile                 # 构建系统，支持 20+ 平台交叉编译
+├── Dockerfile               # Docker 镜像构建
+│
+├── component/               # 构建标签组合（控制编译哪些模块）
+│   ├── base.go              #   基础导入（日志、内存统计、版本）
+│   ├── server.go            #   服务端代理 (tag: server/full/mini)
+│   ├── client.go            #   客户端代理 (tag: client/full/mini)
+│   ├── forward.go           #   端口转发
+│   ├── nat.go               #   NAT 透明代理
+│   ├── custom.go            #   自定义隧道栈
+│   ├── api.go               #   gRPC API 服务
+│   └── mysql.go             #   MySQL 认证后端
+│
+├── proxy/                   # 核心代理引擎
+│   ├── proxy.go             #   中继逻辑（连接/数据包转发、splice、集群路由）
+│   ├── stack.go             #   隧道栈构建器（组合协议层）
+│   ├── config.go            #   代理配置（缓冲区、GC 调优等）
+│   ├── buffer.go            #   缓冲区池管理
+│   ├── profiler.go          #   调试性能分析器
+│   ├── server/server.go     #   服务端隧道栈组装
+│   ├── client/client.go     #   客户端隧道栈组装
+│   ├── forward/             #   端口转发代理
+│   ├── nat/                 #   NAT 透明代理（TProxy）
+│   └── custom/              #   自定义代理（用户定义隧道栈）
+│
+├── tunnel/                  # 隧道协议实现（可组合的协议层）
+│   ├── tunnel.go            #   核心接口定义与隧道注册
+│   ├── adapter/             #   Socks5/HTTP 自动检测适配器
+│   ├── transport/           #   原始 TCP 传输（底层）
+│   ├── tls/                 #   TLS 加密层（含 uTLS 指纹伪造）
+│   ├── websocket/           #   WebSocket 传输（CDN 中转）
+│   ├── trojan/              #   Trojan 协议（认证、帧封装）
+│   ├── mux/                 #   smux 多路复用
+│   ├── singmux/             #   sing-mux 协议（Shadowrocket/sing-box 兼容）
+│   ├── muxcool/             #   v2ray mux.cool 协议兼容
+│   ├── shadowsocks/         #   Shadowsocks AEAD 加密层
+│   ├── simplesocks/         #   Simple SOCKS 协议（mux 上层使用）
+│   ├── socks/               #   SOCKS5 代理（客户端面向）
+│   ├── http/                #   HTTP 代理（客户端面向）
+│   ├── router/              #   路由模块（GeoIP/GeoSite 规则）
+│   ├── freedom/             #   直连出口（目标连接层）
+│   ├── dokodemo/            #   Dokodemo-door（透明代理接受层）
+│   └── tproxy/              #   TProxy 透明代理（Linux）
+│
+├── cluster/                 # 多节点集群出口优选
+│   ├── router.go            #   ClusterRouter 决策引擎
+│   ├── prober.go            #   周期延迟探测（TCP→TLS→WS→Trojan）
+│   ├── route_table.go       #   EWMA 平滑延迟路由表
+│   ├── peer_dialer.go       #   Peer 节点连接拨号器
+│   ├── matcher.go           #   目标匹配（CIDR / 域名 / IP 规则）
+│   └── config.go            #   集群配置定义
+│
+├── api/                     # 外部 API
+│   ├── control/             #   gRPC 控制服务
+│   ├── httpapi/             #   HTTP REST API 与 Web 仪表盘
+│   │   ├── httpapi.go       #     连接监控 HTTP 服务
+│   │   ├── dashboard.go     #     内嵌 HTML5 仪表盘（Chart.js 可视化）
+│   │   └── prometheus.go    #     Prometheus /metrics 端点
+│   └── service/             #   gRPC 服务实现（用户管理等）
+│
+├── statistic/               # 用户认证与流量统计
+│   ├── memory/              #   内存认证器
+│   ├── mysql/               #   MySQL 认证后端
+│   └── connmonitor/         #   连接监控（实时追踪、指标聚合）
+│
+├── config/                  # 配置解析框架（JSON/YAML）
+├── common/                  # 共享工具（IO、splice、网络、GeoData）
+├── log/                     # 日志框架（结构化日志）
+├── option/                  # CLI 选项/标志处理器框架
+├── easy/                    # 简易模式（命令行快速启动）
+├── url/                     # URL 模式（trojan-go:// 链接解析）
+├── redirector/              # 连接重定向器（插件支持）
+├── version/                 # 版本信息
+├── constant/                # 编译时常量（通过 -ldflags 注入）
+├── example/                 # 示例配置与 systemd 服务文件
+└── docs/                    # Hugo 文档站点
+```
 
 ## 使用方法
 
-1. 快速启动服务端和客户端（简易模式）
+### 1. 简易模式（命令行快速启动）
 
-    - 服务端
-
-        ```shell
-        sudo ./trojan-go -server -remote 127.0.0.1:80 -local 0.0.0.0:443 -key ./your_key.key -cert ./your_cert.crt -password your_password
-        ```
-
-    - 客户端
-
-        ```shell
-        ./trojan-go -client -remote example.com:443 -local 127.0.0.1:1080 -password your_password
-        ```
-
-2. 使用配置文件启动客户端 / 服务端 / 透明代理 / 中继（一般模式）
-
-    ```shell
-    ./trojan-go -config config.json
-    ```
-
-3. 使用 URL 启动客户端（格式参见文档）
-
-    ```shell
-    ./trojan-go -url 'trojan-go://password@cloudflare.com/?type=ws&path=%2Fpath&host=your-site.com'
-    ```
-
-4. 使用 Docker 部署
-
-    ```shell
-    docker run \
-        --name trojan-go \
-        -d \
-        -v /etc/trojan-go/:/etc/trojan-go \
-        --network host \
-        p4gefau1t/trojan-go
-    ```
-
-   或者
-
-    ```shell
-    docker run \
-        --name trojan-go \
-        -d \
-        -v /path/to/host/config:/path/in/container \
-        --network host \
-        p4gefau1t/trojan-go \
-        /path/in/container/config.json
-    ```
-
-## 特性
-
-一般情况下，Trojan-Go 和 Trojan 是互相兼容的，但一旦使用下面介绍的扩展特性（如多路复用、Websocket 等），则无法兼容。
-
-### 移植性
-
-编译得到的 Trojan-Go 单个可执行文件不依赖其他组件。同时，你可以很方便地编译（或交叉编译） Trojan-Go，然后在你的服务器、PC、树莓派，甚至路由器上部署；可以方便地使用 build tag 删减模块，以缩小可执行文件体积。
-
-例如，交叉编译一个可在 mips 处理器、Linux 操作系统上运行的、只有客户端功能的 Trojan-Go，只需执行下面的命令，得到的可执行文件可以直接在目标平台运行：
+**服务端：**
 
 ```shell
-CGO_ENABLED=0 GOOS=linux GOARCH=mips go build -tags "client" -trimpath -ldflags "-s -w -buildid="
+sudo ./trojan-go -server \
+    -remote 127.0.0.1:80 \
+    -local 0.0.0.0:443 \
+    -key ./your_key.key \
+    -cert ./your_cert.crt \
+    -password your_password
 ```
 
-完整的 tag 说明参见 [Trojan-Go 文档](https://p4gefau1t.github.io/trojan-go)。
+**客户端：**
 
-### 易用
-
-配置文件格式与原版 Trojan 兼容，但做了大幅简化，未指定的字段会被赋予默认值，由此可以更方便地部署服务端和客户端。以下是一个简单例子，完整的配置文件可以参见[这里](https://p4gefau1t.github.io/trojan-go)。
-
-服务端配置文件 `server.json`：
-
-```json
-{
-  "run_type": "server",
-  "local_addr": "0.0.0.0",
-  "local_port": 443,
-  "remote_addr": "127.0.0.1",
-  "remote_port": 80,
-  "password": ["your_awesome_password"],
-  "ssl": {
-    "cert": "your_cert.crt",
-    "key": "your_key.key",
-    "sni": "www.your-awesome-domain-name.com"
-  }
-}
+```shell
+./trojan-go -client \
+    -remote example.com:443 \
+    -local 127.0.0.1:1080 \
+    -password your_password
 ```
 
-客户端配置文件 `client.json`：
+### 2. 配置文件模式（推荐）
 
-```json
-{
-  "run_type": "client",
-  "local_addr": "127.0.0.1",
-  "local_port": 1080,
-  "remote_addr": "www.your-awesome-domain-name.com",
-  "remote_port": 443,
-  "password": ["your_awesome_password"]
-}
+```shell
+./trojan-go -config config.json
+# 或
+./trojan-go -config config.yaml
 ```
 
-可以使用更简明易读的 YAML 语法进行配置。以下是一个客户端的例子，与上面的 `client.json` 等价：
+### 3. URL 模式
 
-客户端配置文件 `client.yaml`：
-
-```yaml
-run-type: client
-local-addr: 127.0.0.1
-local-port: 1080
-remote-addr: www.your-awesome-domain_name.com
-remote-port: 443
-password:
-  - your_awesome_password
+```shell
+./trojan-go -url 'trojan-go://password@cloudflare.com/?type=ws&path=%2Fpath&host=your-site.com'
 ```
 
-### WebSocket
+### 4. Docker 部署
 
-Trojan-Go 支持使用 TLS + Websocket 承载 Trojan 协议，使得利用 CDN 进行流量中转成为可能。
-
-服务端和客户端配置文件中同时添加 `websocket` 选项即可启用 Websocket 支持，例如
-
-```json
-"websocket": {
-    "enabled": true,
-    "path": "/your-websocket-path",
-    "hostname": "www.your-awesome-domain-name.com"
-}
+```shell
+docker run \
+    --name trojan-go \
+    -d \
+    -v /etc/trojan-go/:/etc/trojan-go \
+    --network host \
+    p4gefau1t/trojan-go
 ```
 
-完整的选项说明参见 [Trojan-Go 文档](https://p4gefau1t.github.io/trojan-go)。
+或指定配置文件路径：
 
-可以省略 `hostname`, 但服务端和客户端的 `path` 必须一致。服务端开启 Websocket 支持后，可以同时支持 Websocket 和一般 Trojan 流量。未配置 Websocket 选项的客户端依然可以正常使用。
-
-由于 Trojan 并不支持 Websocket，因此，虽然开启了 Websocket 支持的 Trojan-Go 服务端可以兼容所有客户端，但如果要使用 Websocket 承载流量，请确保双方都使用 Trojan-Go。
-
-### 多路复用
-
-在很差的网络条件下，一次 TLS 握手可能会花费很多时间。Trojan-Go 支持多路复用（基于 [smux](https://github.com/xtaci/smux)），通过一条 TLS 隧道连接承载多条 TCP 连接的方式，减少 TCP 和 TLS 握手带来的延迟，以期提升高并发情景下的性能。
-
-> 启用多路复用并不能提高测速得到的链路速度，但能降低延迟、提升大量并发请求时的网络体验，例如浏览含有大量图片的网页等。
-
-你可以通过设置客户端的 `mux` 选项 `enabled` 字段启用它：
-
-```json
-"mux": {
-    "enabled": true
-}
+```shell
+docker run \
+    --name trojan-go \
+    -d \
+    -v /path/to/host/config:/path/in/container \
+    --network host \
+    p4gefau1t/trojan-go \
+    /path/in/container/config.json
 ```
 
-只需开启客户端 mux 配置即可，服务端会自动检测是否启用多路复用并提供支持。完整的选项说明参见 [Trojan-Go 文档](https://p4gefau1t.github.io/trojan-go)。
+### 5. systemd 服务
 
-### 路由模块
+安装后可使用 systemd 管理：
 
-Trojan-Go 客户端内建一个简单实用的路由模块，以方便实现国内直连、海外代理等自定义路由功能。
-
-路由策略有三种：
-
-- `Proxy` 代理：将请求通过 TLS 隧道进行代理，由 Trojan 服务端与目的地址进行连接。
-- `Bypass` 绕过：直接使用本地设备与目的地址进行连接。
-- `Block` 封锁：不发送请求，直接关闭连接。
-
-要激活路由模块，请在配置文件中添加 `router` 选项，并设置 `enabled` 字段为 `true`：
-
-```json
-"router": {
-    "enabled": true,
-    "bypass": [
-        "geoip:cn",
-        "geoip:private",
-        "full:localhost"
-    ],
-    "block": [
-        "cidr:192.168.1.1/24",
-    ],
-    "proxy": [
-        "domain:google.com",
-    ],
-    "default_policy": "proxy"
-}
+```shell
+sudo systemctl enable trojan-go
+sudo systemctl start trojan-go
 ```
 
-完整的选项说明参见 [Trojan-Go 文档](https://p4gefau1t.github.io/trojan-go)。
+## 配置说明
 
-### AEAD 加密
+### 基础配置
 
-Trojan-Go 支持基于 Shadowsocks AEAD 对 Trojan 协议流量进行二次加密，以保证 Websocket 传输流量无法被不可信的 CDN 识别和审查：
-
-```json
-"shadowsocks": {
-    "enabled": true,
-    "password": "my-password"
-}
-```
-
-如需开启，服务端和客户端必须同时开启并保证密码一致。
-
-### 传输层插件
-
-Trojan-Go 支持可插拔的传输层插件，并支持 Shadowsocks [SIP003](https://shadowsocks.org/en/wiki/Plugin.html) 标准的混淆插件。下面是使用 `v2ray-plugin` 的一个例子：
-
-> **此配置并不安全，仅作为演示**
-
-服务端配置：
-
-```json
-"transport_plugin": {
-    "enabled": true,
-    "type": "shadowsocks",
-    "command": "./v2ray-plugin",
-    "arg": ["-server", "-host", "www.baidu.com"]
-}
-```
-
-客户端配置：
-
-```json
-"transport_plugin": {
-    "enabled": true,
-    "type": "shadowsocks",
-    "command": "./v2ray-plugin",
-    "arg": ["-host", "www.baidu.com"]
-}
-```
-
-完整的选项说明参见 [Trojan-Go 文档](https://p4gefau1t.github.io/trojan-go)。
-
-### 连接监控与流量仪表盘
-
-Trojan-Go 内置了一套实时连接监控功能，包含：
-
-- **实时连接列表**：追踪每条 TCP 连接的目标地址、上下行速率、已传输字节数、持续时间与状态
-- **聚合流量统计**：活跃连接数、总上行/下行速率、总流量
-- **15 分钟历史曲线**：每秒采样一次，保留最近 900 个数据点，通过 Chart.js 可视化
-- **内嵌 Web 仪表盘**：纯 HTML5 + JavaScript，无需额外部署前端
-- **可选认证**：通过 `secret` 字段保护 API 与仪表盘
-
-在服务端配置中添加 `conn_monitor`（JSON）或 `conn-monitor`（YAML）即可启用。
-
-**JSON 配置示例：**
+**服务端** `server.json`：
 
 ```json
 {
@@ -298,76 +279,221 @@ Trojan-Go 内置了一套实时连接监控功能，包含：
   "password": ["your_password"],
   "ssl": {
     "cert": "your_cert.crt",
-    "key": "your_key.key"
-  },
-  "conn_monitor": {
-    "enabled": true,
-    "addr": "127.0.0.1",
-    "port": 9090,
-    "secret": "my-dashboard-secret"
+    "key": "your_key.key",
+    "sni": "www.your-domain.com"
   }
 }
 ```
 
-**YAML 配置示例：**
+**客户端** `client.json`：
 
-```yaml
-run-type: server
-local-addr: 0.0.0.0
-local-port: 443
-remote-addr: 127.0.0.1
-remote-port: 80
-password:
-  - your_password
-ssl:
-  cert: your_cert.crt
-  key: your_key.key
-conn-monitor:
-  enabled: true
-  addr: 127.0.0.1
-  port: 9090
-  secret: my-dashboard-secret
+```json
+{
+  "run_type": "client",
+  "local_addr": "127.0.0.1",
+  "local_port": 1080,
+  "remote_addr": "www.your-domain.com",
+  "remote_port": 443,
+  "password": ["your_password"]
+}
 ```
 
-**配置字段说明：**
+**等价的 YAML 客户端** `client.yaml`：
+
+```yaml
+run-type: client
+local-addr: 127.0.0.1
+local-port: 1080
+remote-addr: www.your-domain.com
+remote-port: 443
+password:
+  - your_password
+```
+
+### 运行模式
+
+| `run_type` | 说明 |
+|-------------|------|
+| `server` | 服务端，接受入站连接并转发到目标 |
+| `client` | 客户端，接受本地应用连接并通过隧道转发到服务端 |
+| `forward` | 端口转发，将指定端口的流量转发到远程 |
+| `nat` | NAT 透明代理，配合 iptables 实现透明代理 |
+
+## 特性详解
+
+> 一般情况下，Trojan-Go 和原版 Trojan 互相兼容。但一旦使用以下扩展特性（如多路复用、WebSocket 等），则需要双方都使用 Trojan-Go。
+
+### WebSocket
+
+Trojan-Go 支持使用 TLS + WebSocket 承载 Trojan 协议，使得利用 CDN 进行流量中转成为可能。
+
+服务端和客户端配置文件中同时添加 `websocket` 选项即可启用：
+
+```json
+"websocket": {
+    "enabled": true,
+    "path": "/your-websocket-path",
+    "hostname": "www.your-domain.com"
+}
+```
+
+可以省略 `hostname`，但服务端和客户端的 `path` 必须一致。服务端开启 WebSocket 后，可以同时支持 WebSocket 和一般 Trojan 流量。未配置 WebSocket 的客户端依然可以正常使用。
+
+### 多路复用
+
+在网络条件较差时，一次 TLS 握手可能花费较多时间。Trojan-Go 支持多路复用（基于 [smux](https://github.com/xtaci/smux)），通过一条 TLS 隧道连接承载多条 TCP 连接，减少 TCP 和 TLS 握手延迟，提升高并发场景下的性能。
+
+> 启用多路复用不能提高链路速度，但能降低延迟、提升大量并发请求时的体验，例如浏览含有大量图片的网页。
+
+在客户端配置中启用：
+
+```json
+"mux": {
+    "enabled": true
+}
+```
+
+只需开启客户端 mux 配置，服务端会自动检测并提供支持。
+
+**支持的复用协议：**
+
+| 协议 | 状态 |
+|------|------|
+| smux (trojan-go 原生) | ✅ 已支持 |
+| yamux (sing-mux) | ✅ 已支持 |
+| h2mux | ❌ 暂未支持 |
+
+### 路由模块
+
+Trojan-Go 客户端内建路由模块，可实现国内直连、海外代理等自定义路由。
+
+**路由策略：**
+
+| 策略 | 说明 |
+|------|------|
+| `Proxy` | 通过 TLS 隧道代理请求 |
+| `Bypass` | 本地直连目标地址 |
+| `Block` | 封锁，直接关闭连接 |
+
+配置示例：
+
+```json
+"router": {
+    "enabled": true,
+    "bypass": [
+        "geoip:cn",
+        "geoip:private",
+        "full:localhost"
+    ],
+    "block": [
+        "cidr:192.168.1.1/24"
+    ],
+    "proxy": [
+        "domain:google.com"
+    ],
+    "default_policy": "proxy"
+}
+```
+
+### AEAD 加密
+
+Trojan-Go 支持基于 Shadowsocks AEAD 对 Trojan 流量进行二次加密，确保 WebSocket 传输流量不被不可信 CDN 识别和审查：
+
+```json
+"shadowsocks": {
+    "enabled": true,
+    "password": "my-password"
+}
+```
+
+服务端和客户端必须同时开启且密码一致。
+
+### 传输层插件
+
+Trojan-Go 支持可插拔传输层，并兼容 Shadowsocks [SIP003](https://shadowsocks.org/en/wiki/Plugin.html) 标准的混淆插件。以 `v2ray-plugin` 为例：
+
+> **此配置并不安全，仅作为演示。**
+
+服务端：
+
+```json
+"transport_plugin": {
+    "enabled": true,
+    "type": "shadowsocks",
+    "command": "./v2ray-plugin",
+    "arg": ["-server", "-host", "www.baidu.com"]
+}
+```
+
+客户端：
+
+```json
+"transport_plugin": {
+    "enabled": true,
+    "type": "shadowsocks",
+    "command": "./v2ray-plugin",
+    "arg": ["-host", "www.baidu.com"]
+}
+```
+
+### 连接监控与流量仪表盘
+
+Trojan-Go 内置实时连接监控系统：
+
+- **实时连接列表**：追踪每条 TCP 连接的目标地址、上下行速率、已传输字节数、持续时间与状态
+- **聚合流量统计**：活跃连接数、总上行/下行速率、总流量
+- **15 分钟历史曲线**：每秒采样一次，保留最近 900 个数据点，通过 Chart.js 可视化
+- **内嵌 Web 仪表盘**：纯 HTML5 + JavaScript，无需额外部署前端
+- **可选认证**：通过 `secret` 字段保护 API 与仪表盘
+
+**配置示例：**
+
+```json
+"conn_monitor": {
+    "enabled": true,
+    "addr": "127.0.0.1",
+    "port": 9090,
+    "secret": "my-dashboard-secret"
+}
+```
+
+**配置字段：**
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `enabled` | bool | `false` | 是否启用连接监控 |
 | `addr` | string | `127.0.0.1` | HTTP API 绑定地址 |
 | `port` | int | `9090` | HTTP API 绑定端口 |
-| `secret` | string | `""` (空) | API 认证密钥，为空则无需认证 |
+| `secret` | string | `""` | API 认证密钥，为空则无需认证 |
 
 **API 端点：**
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/connections` | 获取所有连接的实时信息（速率、字节、时长、状态） |
-| GET | `/api/summary` | 获取聚合统计（活跃连接数、总速率、总流量） |
-| GET | `/api/history` | 获取最近 15 分钟的流量历史数据点（900 点） |
-| GET | `/api/metrics` | 获取高级指标快照（连接生命周期、吞吐量百分位、TLS 握手、通道水位、Go 运行时等） |
+| GET | `/api/connections` | 所有连接的实时信息（速率、字节、时长、状态） |
+| GET | `/api/summary` | 聚合统计（活跃连接数、总速率、总流量） |
+| GET | `/api/history` | 最近 15 分钟流量历史数据点（900 点） |
+| GET | `/api/metrics` | 高级指标快照（JSON 格式） |
 | POST | `/api/auth` | 验证 secret 并返回认证结果 |
-| GET | `/metrics` | Prometheus 文本格式抓取端点（兼容 Prometheus / OpenMetrics 解析器） |
-| GET | `/dashboard` | 内嵌 Web 仪表盘页面 |
+| GET | `/metrics` | Prometheus 文本格式抓取端点 |
+| GET | `/dashboard` | Web 仪表盘页面 |
 
 **认证方式：**
 
-配置了 `secret` 后，所有 `/api/*` 端点（除 `/api/auth`）需要在请求中提供凭证：
+配置了 `secret` 后，所有 `/api/*` 端点（除 `/api/auth`）需要凭证：
 
 - HTTP Header: `Authorization: Bearer <secret>`
-- 或 URL 参数: `?token=<secret>`
+- URL 参数: `?token=<secret>`
 
-仪表盘 `/dashboard` 页面自带登录界面，输入 secret 后自动以 Bearer token 方式访问 API。
+仪表盘 `/dashboard` 页面自带登录界面。
 
 **快速使用：**
-
-启用后，在浏览器中访问以下地址即可打开仪表盘：
 
 ```
 http://127.0.0.1:9090/dashboard
 ```
 
-或通过 curl 查询 API：
+或通过 curl：
 
 ```shell
 # 无认证
@@ -379,7 +505,7 @@ curl -H "Authorization: Bearer my-dashboard-secret" http://127.0.0.1:9090/api/co
 
 **响应示例：**
 
-`GET /api/summary` 返回：
+`GET /api/summary`：
 
 ```json
 {
@@ -392,7 +518,7 @@ curl -H "Authorization: Bearer my-dashboard-secret" http://127.0.0.1:9090/api/co
 }
 ```
 
-`GET /api/connections` 返回：
+`GET /api/connections`：
 
 ```json
 [
@@ -410,7 +536,7 @@ curl -H "Authorization: Bearer my-dashboard-secret" http://127.0.0.1:9090/api/co
 ]
 ```
 
-#### Prometheus 抓取
+### Prometheus 抓取
 
 启用监控后，Prometheus 可直接抓取 `/metrics` 端点：
 
@@ -422,68 +548,54 @@ scrape_configs:
     static_configs:
       - targets: ['127.0.0.1:9090']
     metrics_path: /metrics
-    # 如配置了 secret，添加 Bearer 认证
-    # authorization:
-    #   type: Bearer
-    #   credentials: my-dashboard-secret
 ```
 
 **Prometheus 指标分类：**
 
 | 类别 | 示例指标 | 说明 |
 |------|----------|------|
-| 连接生命周期 | `trojan_conn_open_total`, `trojan_conn_close_total`, `trojan_conn_close_by_reason_total` | 连接开/关计数，按关闭原因分类（eof/timeout/reset/auth_fail） |
-| 吞吐量百分位 | `trojan_up_bps_p50`, `trojan_down_bps_p95` | 每连接上下行速率 P50/P95（字节/秒） |
-| TLS 握手 | `trojan_tls_handshake_total`, `trojan_tls_handshake_p50_ms` | TLS 握手次数、失败数、会话恢复、延迟百分位 |
-| 源站拨号 | `trojan_origin_dial_total`, `trojan_origin_dial_p95_ms` | 源站连接次数、失败分类（dns/refused/timeout）、延迟 |
+| 连接生命周期 | `trojan_conn_open_total`, `trojan_conn_close_total`, `trojan_conn_close_by_reason_total` | 连接开关计数，按关闭原因分类 (eof/timeout/reset/auth_fail) |
+| 吞吐量百分位 | `trojan_up_bps_p50`, `trojan_down_bps_p95` | 每连接上下行速率 P50/P95 (bytes/s) |
+| TLS 握手 | `trojan_tls_handshake_total`, `trojan_tls_handshake_p50_ms` | 握手次数、失败数、会话恢复、延迟百分位 |
+| 源站拨号 | `trojan_origin_dial_total`, `trojan_origin_dial_p95_ms` | 源站连接次数、失败分类、延迟 |
 | TTFB | `trojan_ttfb_p50_ms`, `trojan_ttfb_p95_ms` | 首字节时间百分位 |
 | Trojan 认证 | `trojan_auth_total`, `trojan_auth_failed_total` | 认证次数、失败分类、延迟百分位 |
-| 通道水位 | `trojan_channel_depth`, `trojan_channel_cap` | 内部通道深度与容量（按 `name` 标签区分） |
-| 多路复用 | `trojan_mux_streams_active`, `trojan_mux_streams_per_conn_p95` | 活跃 mux 流数、每物理连接流数百分位、队列深度 |
-| 零拷贝 splice | `trojan_splice_bytes_total`, `trojan_splice_fallback_total` | splice(2) 传输字节数、调用次数、回退到用户态拷贝次数 |
-| TCP 遥测 | `trojan_tcp_rtt_p50_us`, `trojan_tcp_cwnd_p95`, `trojan_tcp_loss_total` | TCP RTT（微秒）、拥塞窗口、丢包事件 |
-| 按用户 | `trojan_user_bytes_down_total{hash="abc"}` | 每用户连接数、认证失败、上下行字节（按 `hash` 标签区分） |
-| 按目标 | `trojan_target_dials_total{host="google.com"}` | 每目标拨号次数、失败、上下行字节、延迟百分位 |
-| 数据包流 | `trojan_packet_open_total`, `trojan_packet_pps_p50` | UDP 数据包流开/关、PPS/BPS 百分位 |
-| DNS | `trojan_dns_resolve_total`, `trojan_dns_resolve_p95_ms` | DNS 解析次数、失败数、延迟百分位 |
+| 通道水位 | `trojan_channel_depth`, `trojan_channel_cap` | 内部通道深度与容量 |
+| 多路复用 | `trojan_mux_streams_active`, `trojan_mux_streams_per_conn_p95` | 活跃 mux 流数、每物理连接流数百分位 |
+| 零拷贝 splice | `trojan_splice_bytes_total`, `trojan_splice_fallback_total` | splice 传输字节数、调用次数、回退次数 |
+| TCP 遥测 | `trojan_tcp_rtt_p50_us`, `trojan_tcp_cwnd_p95` | TCP RTT (μs)、拥塞窗口、丢包事件 |
+| 按用户 | `trojan_user_bytes_down_total{hash="abc"}` | 每用户连接数、认证失败、上下行字节 |
+| 按目标 | `trojan_target_dials_total{host="google.com"}` | 每目标拨号次数、失败、延迟百分位 |
+| 数据包流 | `trojan_packet_open_total`, `trojan_packet_pps_p50` | UDP 数据包流开关、PPS/BPS 百分位 |
+| DNS | `trojan_dns_resolve_total`, `trojan_dns_resolve_p95_ms` | DNS 解析次数、失败数、延迟 |
 | 反压 | `trojan_accept_drops_total`, `trojan_backpressure_events_total` | Accept 丢弃、反压事件计数 |
-| Go 运行时 | `trojan_go_goroutines`, `trojan_go_heap_alloc_mb`, `trojan_go_gc_pause_last_ms` | goroutine 数、堆内存、GC 暂停 |
+| Go 运行时 | `trojan_go_goroutines`, `trojan_go_heap_alloc_mb` | goroutine 数、堆内存、GC 暂停 |
 
-> **提示：** 所有带 `_p50` / `_p95` 后缀的指标基于蓄水池采样（4096 样本上限）进行百分位估算，适用于实时观测，非精确统计。
+> 所有 `_p50` / `_p95` 后缀指标基于蓄水池采样（4096 样本上限）进行百分位估算，适用于实时观测。
 
-#### `GET /api/metrics` 响应示例
+### 零拷贝 splice 加速
 
-返回完整的高级指标快照（与 `/metrics` 同源，JSON 格式）：
+> 仅 Linux 平台支持。
+
+在配置中启用 `enable_zero_copy`，代理引擎会自动对两端均为原始 TCP 连接的 relay 使用 Linux `splice(2)` 系统调用，通过内核管道转发数据，实现零用户态拷贝。非 TCP 连接（如 TLS、mux）自动回退到普通 `io.Copy`。
 
 ```json
 {
-  "conn_open_total": 1024,
-  "conn_close_total": 980,
-  "open_cps": 5,
-  "close_cps": 3,
-  "up_bps_p50": 2048.0,
-  "up_bps_p95": 65536.0,
-  "down_bps_p50": 8192.0,
-  "down_bps_p95": 131072.0,
-  "tls_handshake_total": 500,
-  "tls_handshake_failed": 2,
-  "mux_streams_active": 12,
-  "mux_streams_total": 340,
-  "splice_bytes_total": 1048576,
-  "tcp_rtt_p50_us": 12000,
-  "tcp_rtt_p95_us": 45000,
-  "goroutines": 64,
-  "heap_alloc_mb": 12.5
+  "run_type": "server",
+  "enable_zero_copy": true,
+  "...": "..."
 }
 ```
 
+启用后，`trojan_splice_bytes_total` 和 `trojan_splice_calls_total` 指标会记录 splice 传输的字节数和调用次数，`trojan_splice_fallback_total` 记录回退到用户态拷贝的次数。
+
 ### 集群出口优选
 
-当你在多个地区部署了 Trojan-Go 服务端节点时，可以启用集群出口优选功能。该功能会自动探测各节点到目标站点的延迟，并将连接通过延迟最低的节点中继转发，从而降低用户感知延迟。
+当在多个地区部署 Trojan-Go 服务端节点时，可启用集群出口优选。该功能自动探测各节点到目标站点的延迟，并将连接通过延迟最低的节点中继转发。
 
 **典型场景**：用户连接新加坡入口节点，访问 Telegram 时自动经由洛杉矶节点出口（延迟从 249ms 降至 15ms）。
 
-**入口节点**（启用集群，配置 peer）的 JSON 配置：
+**入口节点配置：**
 
 ```json
 {
@@ -529,7 +641,7 @@ scrape_configs:
 }
 ```
 
-**出口节点**（无需配置集群，只需将 peer 密码加入 password 列表）：
+**出口节点**（只需将 peer 密码加入 password 列表）：
 
 ```json
 {
@@ -551,96 +663,84 @@ scrape_configs:
 }
 ```
 
-YAML 入口节点配置示例：
-
-```yaml
-run-type: server
-local-addr: 0.0.0.0
-local-port: 443
-remote-addr: 127.0.0.1
-remote-port: 80
-password:
-  - user-password
-ssl:
-  cert: your_cert.crt
-  key: your_key.key
-cluster:
-  enabled: true
-  node-name: singapore-1
-  probe-interval: 120
-  probe-timeout: 3000
-  relay-threshold: 50
-  latency-threshold: 100
-  targets:
-    - 'cidr:149.154.160.0/20'
-    - 'cidr:91.108.0.0/16'
-  peers:
-    - name: la-1
-      host: la.example.com
-      port: 443
-      password: peer-shared-secret
-      websocket:
-        enabled: true
-        host: la.example.com
-        path: /ws
-      ssl:
-        sni: la.example.com
-        verify: true
-```
-
-**配置字段说明：**
+**配置字段：**
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `enabled` | bool | `false` | 是否启用集群出口优选 |
-| `node_name` | string | `"local"` | 本节点名称，用于路由表标识 |
+| `node_name` | string | `"local"` | 本节点名称 |
 | `probe_interval` | int | `120` | 探测间隔（秒），最小 60 |
 | `probe_timeout` | int | `3000` | 探测超时（毫秒） |
 | `relay_threshold` | int | `50` | 中继阈值（毫秒），peer 延迟比本地低超过此值才中继 |
-| `latency_threshold` | int | `100` | 延迟触发阈值（毫秒），origin dial RTT 超过此值的目标才纳入探测 |
+| `latency_threshold` | int | `100` | 延迟触发阈值（毫秒），origin dial RTT 超过此值才纳入探测 |
 | `targets` | []string | `[]` | 目标匹配规则，支持 `cidr:`, `domain:`, `ip:` |
 | `peers` | []object | `[]` | peer 节点列表 |
 
-**Peer 字段说明：**
+**工作原理：**
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `name` | string | 节点名称 |
-| `host` | string | 节点地址 |
-| `port` | int | 节点端口 |
-| `password` | string | Trojan 认证密码 |
-| `weight` | int | 权重（同延迟下的偏好，0=按 RTT 排序） |
-| `websocket.enabled` | bool | 是否使用 WebSocket 连接 peer |
-| `websocket.host` | string | WebSocket Host 头 |
-| `websocket.path` | string | WebSocket 路径 |
-| `ssl.sni` | string | TLS SNI（默认使用 host） |
-| `ssl.verify` | bool | 是否验证 peer 的 TLS 证书 |
-
-**工作原理**：
-
-1. Prober 定期探测各 peer 节点到目标的端到端延迟（通过 TCP→TLS→WebSocket→Trojan 通道）
-2. 数据路径中 origin dial 延迟超过 `latency_threshold` 的目标会被动态注册到探测列表
+1. Prober 定期探测各 peer 节点到目标的端到端延迟（TCP→TLS→WebSocket→Trojan 通道）
+2. origin dial 延迟超过 `latency_threshold` 的目标会被动态注册到探测列表
 3. RouteTable 使用 EWMA 平滑延迟数据，选择最优出口节点
 4. 当 peer 延迟比本地低超过 `relay_threshold` 时，连接自动通过该 peer 中继
 5. 中继失败时自动回退到本地直连
 
 启用连接监控后，可通过 `GET /api/cluster` 查看集群路由状态。
 
+### 调试性能分析器
+
+在配置中设置 `"debug": true` 可启用调试性能分析器。启用后，代理会周期性地将性能快照写入 `profile_debug/` 目录，包括：
+
+- goroutine 数量与状态
+- 活跃连接数
+- GC 暂停时间与堆内存
+- 内部通道填充水位
+- TTFB 分布
+- 延迟采样
+
+```json
+{
+  "run_type": "server",
+  "debug": true,
+  "...": "..."
+}
+```
+
+> 仅用于诊断问题，不建议在生产环境长期开启。
+
+### 运行时调优参数
+
+以下参数可在配置文件顶层设置，用于微调代理行为：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `relay_buffer_size` | int | `32768` (32 KiB) | TCP 中继缓冲区大小，范围 [4096, 1048576] |
+| `backpressure_thresh` | float64 | `0` | 反压阈值 (0, 1]，通道填充率超过此值记录反压事件 |
+| `enable_packet_pool` | bool | `true` | 启用 UDP 数据包缓冲区池，减少 GC 压力 |
+| `enable_zero_copy` | bool | `false` | 启用 Linux splice(2) 零拷贝 TCP 中继 |
+| `gogc` | int | `0` (Go 默认 100) | GC 目标百分比，100-400 适合长驻代理进程 |
+| `mem_limit_mb` | int64 | `0` (禁用) | 软内存限制 (MB)，通过 `debug.SetMemoryLimit` 设置 |
+| `debug` | bool | `false` | 启用调试性能分析器 |
+
+配置示例：
+
+```json
+{
+  "run_type": "server",
+  "relay_buffer_size": 65536,
+  "gogc": 200,
+  "mem_limit_mb": 128,
+  "enable_zero_copy": true,
+  "...": "..."
+}
+```
+
 ## sing-mux 兼容（Shadowrocket / sing-box Mux 支持）
 
-trojan-go 现在兼容 sing-mux 协议，支持 Shadowrocket 和 sing-box 客户端开启 Mux 多路复用功能。服务端通过 trojan 协议头中的目标地址自动识别客户端类型，**无需额外配置**。
-
-### 支持的 mux 协议
-
-| 协议 | 状态 |
-|------|------|
-| smux | 已支持 |
-| yamux | 已支持 |
-| h2mux | 暂未支持 |
+trojan-go 兼容 sing-mux 协议，支持 Shadowrocket 和 sing-box 客户端开启 Mux 多路复用。服务端通过 trojan 协议头中的目标地址自动识别客户端类型，**无需额外配置**。
 
 ### 工作原理
 
-sing-mux 客户端（Shadowrocket / sing-box）连接服务端时，trojan 协议头中目标地址为 `sp.mux.sing-box.arpa:444`。trojan-go 检测到该魔术地址后，走 sing-mux 处理路径：
+sing-mux 客户端连接服务端时，trojan 协议头中目标地址为 `sp.mux.sing-box.arpa:444`。trojan-go 检测到该魔术地址后，走 sing-mux 处理路径：
 
 ```
 客户端 → nginx(TLS+WS) → trojan-go → 自动检测:
@@ -667,12 +767,6 @@ location /ws {
     proxy_connect_timeout 60s;
 }
 ```
-
-| 参数 | 推荐值 | 说明 |
-|------|--------|------|
-| `proxy_read_timeout` | `3600s` | 防止空闲断连，建议 ≥ 1h |
-| `proxy_send_timeout` | `3600s` | 与 read_timeout 一致 |
-| `proxy_connect_timeout` | `60s` | 建连超时，默认即可 |
 
 ### Shadowrocket 客户端配置
 
@@ -727,53 +821,80 @@ Mux:      开启
 
 ## 构建
 
-> 请确保 Go 版本 >= 1.14
+> 请确保 Go 版本 >= 1.19
 
-使用 `make` 进行编译：
+### 使用 Make 构建
 
 ```shell
-git clone https://github.com/p4gefau1t/trojan-go.git
+git clone https://github.com/1238616/trojan-go.git
 cd trojan-go
 make
-make install #安装systemd服务等，可选
+make install  # 安装 systemd 服务等（可选）
 ```
 
-或者使用 Go 自行编译：
+### 使用 Go 构建
 
 ```shell
 go build -tags "full"
 ```
 
-> **重要：** 必须指定 `-tags "full"`（或其他功能标签如 `client`、`server`），否则编译出的二进制仅包含 `-version` 标志，不支持 `-config` 等运行时参数。
+> **重要：** 必须指定 `-tags "full"`（或其他功能标签如 `client`、`server`、`mini`），否则编译出的二进制仅包含 `-version` 标志。
 
-Go 支持通过设置环境变量进行交叉编译，例如：
+### Build Tags
 
-编译适用于 64 位 Windows 操作系统的可执行文件：
+| Tag | 说明 |
+|-----|------|
+| `full` | 包含所有功能模块 |
+| `server` | 仅服务端 |
+| `client` | 仅客户端 |
+| `mini` | 最小化（客户端 + 服务端） |
+| `custom` | 自定义隧道栈 |
+
+### 交叉编译
+
+Go 支持通过环境变量进行交叉编译，编译出的单个可执行文件不依赖其他组件：
+
+**64 位 Linux：**
 
 ```shell
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -tags "full" -trimpath -ldflags="-s -w"
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags "full" -trimpath -ldflags="-s -w -buildid="
 ```
 
-编译适用于 Apple Silicon 的可执行文件：
+**Apple Silicon (macOS arm64)：**
 
 ```shell
-CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -tags "full" -trimpath -ldflags="-s -w"
+CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -tags "full" -trimpath -ldflags="-s -w -buildid="
 ```
 
-编译适用于 64 位 Linux 操作系统的可执行文件：
+**64 位 Windows：**
 
 ```shell
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags "full" -trimpath -ldflags="-s -w"
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -tags "full" -trimpath -ldflags="-s -w -buildid="
 ```
+
+**MIPS 路由器 (Linux mips softfloat)：**
+
+```shell
+CGO_ENABLED=0 GOOS=linux GOARCH=mips GOMIPS=softfloat go build -tags "client" -trimpath -ldflags="-s -w -buildid="
+```
+
+### 支持的平台
+
+| 操作系统 | 架构 |
+|----------|------|
+| Linux | 386, amd64, arm (v5/v6/v7/v8), mips (soft/hard float), mipsle, mips64, mips64le |
+| macOS | amd64, arm64 |
+| Windows | 386, amd64, arm (v6/v7), arm64 |
+| FreeBSD | 386, amd64 |
 
 ## 致谢
 
-- [Trojan](https://github.com/trojan-gfw/trojan)
-- [V2Fly](https://github.com/v2fly)
-- [utls](https://github.com/refraction-networking/utls)
-- [smux](https://github.com/xtaci/smux)
-- [go-tproxy](https://github.com/LiamHaworth/go-tproxy)
+- [Trojan](https://github.com/trojan-gfw/trojan) — 原版 Trojan 代理
+- [V2Fly](https://github.com/v2fly) — V2Ray 核心（路由、GeoIP/GeoSite 数据、mux 协议）
+- [utls](https://github.com/refraction-networking/utls) — TLS 指纹伪造
+- [smux](https://github.com/xtaci/smux) — 多路复用协议
+- [go-tproxy](https://github.com/LiamHaworth/go-tproxy) — TProxy 透明代理
 
-## Stargazers over time
+## License
 
-[![Stargazers over time](https://starchart.cc/p4gefau1t/trojan-go.svg)](https://starchart.cc/p4gefau1t/trojan-go)
+[GNU General Public License v3.0](LICENSE)
