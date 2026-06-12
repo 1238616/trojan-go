@@ -1,0 +1,52 @@
+{
+    "run_type": "server",
+    "local_addr": "0.0.0.0",
+    "local_port": 443,
+    "remote_addr": "127.0.0.1",
+    "remote_port": 80,
+    "password": [
+        "your_password"
+    ],
+    "ssl": {
+        "cert": "your_cert.crt",
+        "key": "your_key.key",
+        "sni": "your-domain-name.com"
+    },
+    "router": {
+        "enabled": true,
+        "block": [
+            "geoip:private"
+        ],
+        "geoip": "/usr/share/trojan-go/geoip.dat",
+        "geosite": "/usr/share/trojan-go/geosite.dat"
+    },
+    "cluster": {
+        "enabled": false,
+        "node_name": "node-1",
+        "probe_interval": 120,
+        "probe_timeout": 3000,
+        "relay_threshold": 50,
+        "latency_threshold": 100,
+        "targets": [
+            "cidr:149.154.160.0/20",
+            "cidr:91.108.0.0/16"
+        ],
+        "peers": [
+            {
+                "name": "peer-1",
+                "host": "peer.example.com",
+                "port": 443,
+                "password": "peer-shared-secret",
+                "websocket": {
+                    "enabled": true,
+                    "host": "peer.example.com",
+                    "path": "/ws"
+                },
+                "ssl": {
+                    "sni": "peer.example.com",
+                    "verify": true
+                }
+            }
+        ]
+    }
+}

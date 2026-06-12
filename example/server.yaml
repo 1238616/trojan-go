@@ -1,0 +1,39 @@
+run-type: server
+local-addr: 0.0.0.0
+local-port: 443
+remote-addr: 127.0.0.1
+remote-port: 80
+password:
+  - your_password
+ssl:
+  cert: your_cert.crt
+  key: your_key.key
+  sni: your-domain-name.com
+router:
+  enabled: true
+  block:
+    - 'geoip:private'
+  geoip: /usr/share/trojan-go/geoip.dat
+  geosite: /usr/share/trojan-go/geosite.dat
+cluster:
+  enabled: false
+  node-name: node-1
+  probe-interval: 120
+  probe-timeout: 3000
+  relay-threshold: 50
+  latency-threshold: 100
+  targets:
+    - 'cidr:149.154.160.0/20'
+    - 'cidr:91.108.0.0/16'
+  peers:
+    - name: peer-1
+      host: peer.example.com
+      port: 443
+      password: peer-shared-secret
+      websocket:
+        enabled: true
+        host: peer.example.com
+        path: /ws
+      ssl:
+        sni: peer.example.com
+        verify: true
