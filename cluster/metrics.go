@@ -14,8 +14,9 @@ type ClusterMetrics struct {
 	totalGainMs    int64 // cumulative gain in milliseconds
 
 	// Per-peer relay counts
-	peerRelays    map[string]*int64
-	peerFallbacks map[string]*int64
+	peerRelays      map[string]*int64
+	peerFallbacks   map[string]*int64
+	peerActiveConns map[string]*int64
 
 	lastProbeAt   time.Time
 	lastProbeDur  time.Duration
@@ -23,8 +24,9 @@ type ClusterMetrics struct {
 
 func NewClusterMetrics() *ClusterMetrics {
 	return &ClusterMetrics{
-		peerRelays:    make(map[string]*int64),
-		peerFallbacks: make(map[string]*int64),
+		peerRelays:      make(map[string]*int64),
+		peerFallbacks:   make(map[string]*int64),
+		peerActiveConns: make(map[string]*int64),
 	}
 }
 
@@ -74,6 +76,55 @@ func (m *ClusterMetrics) RecordProbe(dur time.Duration) {
 	m.mu.Unlock()
 }
 
+func (m *ClusterMetrics) RecordRelayOpen(peerName string) {
+	m.mu.RLock()
+	counter, ok := m.peerActiveConns[peerName]
+	m.mu.RUnlock()
+	if !ok {
+		m.mu.Lock()
+		counter, ok = m.peerActiveConns[peerName]
+		if !ok {
+			var c int64
+			counter = &c
+			m.peerActiveConns[peerName] = counter
+		}
+		m.mu.Unlock()
+	}
+	atomic.AddInt64(counter, 1)
+}
+
+func (m *ClusterMetrics) RecordRelayClose(peerName string) {
+	m.mu.RLock()
+	counter, ok := m.peerActiveConns[peerName]
+	m.mu.RUnlock()
+	if ok {
+		atomic.AddInt64(counter, -1)
+	}
+}
+
+type PeerMetricSnapshot struct {
+	TotalRelays    int64
+	TotalFallbacks int64
+	ActiveConns    int64
+}
+
+func (m *ClusterMetrics) PeerSnapshot(peerName string) PeerMetricSnapshot {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var s PeerMetricSnapshot
+	if c, ok := m.peerRelays[peerName]; ok {
+		s.TotalRelays = atomic.LoadInt64(c)
+	}
+	if c, ok := m.peerFallbacks[peerName]; ok {
+		s.TotalFallbacks = atomic.LoadInt64(c)
+	}
+	if c, ok := m.peerActiveConns[peerName]; ok {
+		s.ActiveConns = atomic.LoadInt64(c)
+	}
+	return s
+}
+
 func (m *ClusterMetrics) Snapshot() ClusterStats {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -102,6 +153,8 @@ func (m *ClusterMetrics) Snapshot() ClusterStats {
 
 type ClusterAPIResponse struct {
 	Enabled          bool                  `json:"enabled"`
+	ForceRelay       bool                  `json:"force_relay"`
+	Mode             string                `json:"mode"`
 	LocalNode        string                `json:"local_node"`
 	ProbeInterval    int                   `json:"probe_interval_sec"`
 	LatencyThreshold int                   `json:"latency_threshold_ms"`
@@ -111,12 +164,16 @@ type ClusterAPIResponse struct {
 }
 
 type PeerStatus struct {
-	Name        string      `json:"name"`
-	Host        string      `json:"host"`
-	Port        int         `json:"port"`
-	Available   bool        `json:"available"`
-	LastProbeAt string      `json:"last_probe_at"`
-	TargetRTTs  []TargetRTT `json:"target_rtts"`
+	Name           string      `json:"name"`
+	Host           string      `json:"host"`
+	Port           int         `json:"port"`
+	Available      bool        `json:"available"`
+	LastProbeAt    string      `json:"last_probe_at"`
+	ActiveRelays   int64       `json:"active_relays"`
+	TotalRelays    int64       `json:"total_relays"`
+	TotalFallbacks int64       `json:"total_fallbacks"`
+	ConnLatencyMs  float64     `json:"conn_latency_ms"`
+	TargetRTTs     []TargetRTT `json:"target_rtts"`
 }
 
 type TargetRTT struct {

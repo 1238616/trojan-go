@@ -236,7 +236,10 @@ const dashboardHTML = `<!DOCTYPE html>
 
   <!-- Cluster Routing Optimization -->
   <div id="clusterSection" style="display:none">
-    <h2 style="margin:24px 0 16px;font-size:16px;font-weight:600;color:#f1f5f9">Cluster Routing Optimization</h2>
+    <h2 style="margin:24px 0 16px;font-size:16px;font-weight:600;color:#f1f5f9;display:flex;align-items:center;gap:12px">
+      Cluster Routing Optimization
+      <span id="clModeBadge" style="display:none;padding:3px 10px;border-radius:9999px;font-size:11px;font-weight:700;letter-spacing:0.05em"></span>
+    </h2>
     <div class="stats-grid" style="grid-template-columns:repeat(4,1fr)">
       <div class="stat-card">
         <div class="label">Local Node</div>
@@ -248,8 +251,8 @@ const dashboardHTML = `<!DOCTYPE html>
         <div class="value" id="clTotalRelays">0</div>
         <div class="sub">fallbacks: <span id="clTotalFallbacks">0</span></div>
       </div>
-      <div class="stat-card">
-        <div class="label">Avg Gain</div>
+      <div class="stat-card" id="clGainCard">
+        <div class="label" id="clGainLabel">Avg Gain</div>
         <div class="value" style="color:#22c55e" id="clAvgGain">0<span class="unit">ms</span></div>
         <div class="sub">last probe: <span id="clLastProbe">-</span></div>
       </div>
@@ -260,14 +263,16 @@ const dashboardHTML = `<!DOCTYPE html>
       </div>
     </div>
     <div class="metrics-grid">
-      <div class="metric-card">
-        <h3>Peer Nodes</h3>
+      <div class="metric-card" id="clPeersCard" style="grid-column:span 2">
+        <h3>Master &rarr; Peer Connections</h3>
         <table style="font-size:12px;width:100%">
-          <thead><tr><th>Name</th><th>Host</th><th>Status</th><th>Last Probe</th></tr></thead>
-          <tbody id="clPeersBody"><tr><td colspan="4" style="text-align:center;color:#64748b">no peers</td></tr></tbody>
+          <thead id="clPeersHead">
+            <tr><th>Name</th><th>Host</th><th>Status</th><th>Latency</th><th>Active</th><th>Relays</th><th>Fallbacks</th></tr>
+          </thead>
+          <tbody id="clPeersBody"><tr><td colspan="7" style="text-align:center;color:#64748b">no peers</td></tr></tbody>
         </table>
       </div>
-      <div class="metric-card">
+      <div class="metric-card" id="clRoutesCard">
         <h3>Optimized Routes</h3>
         <table style="font-size:12px;width:100%">
           <thead><tr><th>Target</th><th>Local RTT</th><th>Best Peer</th><th>Peer RTT</th><th>Gain</th></tr></thead>
@@ -661,34 +666,81 @@ function updateCluster(data) {
   var sec = document.getElementById('clusterSection');
   if (!data || !data.enabled) { sec.style.display = 'none'; return; }
   sec.style.display = 'block';
+
+  // Mode badge
+  var badge = document.getElementById('clModeBadge');
+  if (data.force_relay) {
+    badge.style.display = 'inline-block';
+    badge.style.background = '#7c3aed';
+    badge.style.color = '#f5f3ff';
+    badge.textContent = 'FORCE RELAY';
+  } else {
+    badge.style.display = 'inline-block';
+    badge.style.background = '#065f46';
+    badge.style.color = '#6ee7b7';
+    badge.textContent = 'OPTIMIZED';
+  }
+
   document.getElementById('clLocalNode').textContent = data.local_node || '-';
   document.getElementById('clProbeInterval').textContent = data.probe_interval_sec || '-';
   var st = data.stats || {};
   document.getElementById('clTotalRelays').textContent = st.total_relays || 0;
   document.getElementById('clTotalFallbacks').textContent = st.total_fallbacks || 0;
-  document.getElementById('clAvgGain').innerHTML = (st.avg_gain_ms || 0).toFixed(1) + '<span class="unit">ms</span>';
   document.getElementById('clLastProbe').textContent = st.last_probe_at || '-';
   document.getElementById('clProbeTargets').textContent = st.probe_targets || 0;
   document.getElementById('clStaticTargets').textContent = st.static_targets || 0;
   document.getElementById('clDynamicTargets').textContent = st.dynamic_targets || 0;
+
   var peers = data.peers || [];
+
+  // In force_relay mode, show total active relays instead of avg gain
+  if (data.force_relay) {
+    var totalActive = 0;
+    for (var i = 0; i < peers.length; i++) totalActive += (peers[i].active_relays || 0);
+    document.getElementById('clGainLabel').textContent = 'Active Relays';
+    document.getElementById('clAvgGain').innerHTML = totalActive + '<span class="unit">conns</span>';
+  } else {
+    document.getElementById('clGainLabel').textContent = 'Avg Gain';
+    document.getElementById('clAvgGain').innerHTML = (st.avg_gain_ms || 0).toFixed(1) + '<span class="unit">ms</span>';
+  }
+
+  // Peer table — enhanced for force_relay
   var phtml = '';
   for (var i = 0; i < peers.length; i++) {
     var p = peers[i];
-    var badge = p.available ? 'badge-active' : 'badge-closed';
+    var badge2 = p.available ? 'badge-active' : 'badge-closed';
     var label = p.available ? 'online' : 'offline';
-    phtml += '<tr><td>' + p.name + '</td><td>' + p.host + ':' + p.port + '</td><td><span class="badge ' + badge + '">' + label + '</span></td><td>' + (p.last_probe_at || '-') + '</td></tr>';
+    var latency = (p.conn_latency_ms >= 0) ? (p.conn_latency_ms.toFixed(1) + ' ms') : '-';
+    phtml += '<tr>'
+      + '<td>' + p.name + '</td>'
+      + '<td>' + p.host + ':' + p.port + '</td>'
+      + '<td><span class="badge ' + badge2 + '">' + label + '</span></td>'
+      + '<td>' + latency + '</td>'
+      + '<td style="font-weight:600">' + (p.active_relays || 0) + '</td>'
+      + '<td>' + (p.total_relays || 0) + '</td>'
+      + '<td class="' + ((p.total_fallbacks || 0) > 0 ? 'err' : '') + '">' + (p.total_fallbacks || 0) + '</td>'
+      + '</tr>';
   }
-  document.getElementById('clPeersBody').innerHTML = phtml || '<tr><td colspan="4" style="text-align:center;color:#64748b">no peers</td></tr>';
-  var routes = data.optimized_routes || [];
-  var rhtml = '';
-  for (var i = 0; i < routes.length; i++) {
-    var rt = routes[i];
-    var localCell = (rt.local_rtt_ms < 0) ? '<td style="color:#ef4444">Unreachable</td>' : '<td>' + rt.local_rtt_ms.toFixed(1) + ' ms</td>';
-    var gainCell = (rt.local_rtt_ms < 0) ? '<td style="color:#f59e0b">Relay (blocked)</td>' : '<td style="color:#22c55e">-' + (rt.gain_ms || 0).toFixed(0) + ' ms (' + (rt.gain_percent || 0).toFixed(0) + '%)</td>';
-    rhtml += '<tr><td style="font-family:ui-monospace,monospace">' + rt.target + '</td>' + localCell + '<td style="color:#22c55e">' + rt.best_peer + '</td><td>' + (rt.peer_rtt_ms || 0).toFixed(1) + ' ms</td>' + gainCell + '</tr>';
+  document.getElementById('clPeersBody').innerHTML = phtml || '<tr><td colspan="7" style="text-align:center;color:#64748b">no peers</td></tr>';
+
+  // Optimized Routes — hide in force_relay mode
+  var routesCard = document.getElementById('clRoutesCard');
+  if (data.force_relay) {
+    routesCard.style.display = 'none';
+    document.getElementById('clPeersCard').style.gridColumn = 'span 2';
+  } else {
+    routesCard.style.display = '';
+    document.getElementById('clPeersCard').style.gridColumn = '';
+    var routes = data.optimized_routes || [];
+    var rhtml = '';
+    for (var i = 0; i < routes.length; i++) {
+      var rt = routes[i];
+      var localCell = (rt.local_rtt_ms < 0) ? '<td style="color:#ef4444">Unreachable</td>' : '<td>' + rt.local_rtt_ms.toFixed(1) + ' ms</td>';
+      var gainCell = (rt.local_rtt_ms < 0) ? '<td style="color:#f59e0b">Relay (blocked)</td>' : '<td style="color:#22c55e">-' + (rt.gain_ms || 0).toFixed(0) + ' ms (' + (rt.gain_percent || 0).toFixed(0) + '%)</td>';
+      rhtml += '<tr><td style="font-family:ui-monospace,monospace">' + rt.target + '</td>' + localCell + '<td style="color:#22c55e">' + rt.best_peer + '</td><td>' + (rt.peer_rtt_ms || 0).toFixed(1) + ' ms</td>' + gainCell + '</tr>';
+    }
+    document.getElementById('clRoutesBody').innerHTML = rhtml || '<tr><td colspan="5" style="text-align:center;color:#64748b">no optimized routes</td></tr>';
   }
-  document.getElementById('clRoutesBody').innerHTML = rhtml || '<tr><td colspan="5" style="text-align:center;color:#64748b">no optimized routes</td></tr>';
 }
 
 function fetchAll() {

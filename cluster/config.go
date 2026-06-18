@@ -27,6 +27,7 @@ type PeerConfig struct {
 
 type Config struct {
 	Enabled          bool         `json:"enabled" yaml:"enabled"`
+	ForceRelay       bool         `json:"force_relay" yaml:"force-relay"`
 	NodeName         string       `json:"node_name" yaml:"node-name"`
 	Peers            []PeerConfig `json:"peers" yaml:"peers"`
 	ProbeInterval    int          `json:"probe_interval" yaml:"probe-interval"`

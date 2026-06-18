@@ -148,6 +148,31 @@ func (rt *RouteTable) BestExit(targetIP string) (peerName string, relayGain time
 	return "", 0
 }
 
+// FastestPeer returns the fastest available peer for a target IP,
+// ignoring local node entirely. Used by ForceRelay mode.
+func (rt *RouteTable) FastestPeer(targetIP string) string {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+
+	peers := rt.match(targetIP)
+	now := time.Now()
+	var best PeerLatency
+	best.RTT = time.Duration(math.MaxInt64)
+
+	for _, p := range peers {
+		if now.Sub(p.UpdatedAt) > staleThreshold {
+			continue
+		}
+		if p.PeerName == rt.localName {
+			continue
+		}
+		if p.Available && p.RTT < best.RTT {
+			best = p
+		}
+	}
+	return best.PeerName
+}
+
 // match finds entries for a target. Tries exact match first,
 // then falls back to CIDR prefix matching.
 func (rt *RouteTable) match(targetIP string) []PeerLatency {

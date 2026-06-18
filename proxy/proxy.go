@@ -111,6 +111,7 @@ func (p *Proxy) relayConnLoop() {
 						dialStart := time.Now()
 						outbound, err = p.sink.DialConn(inbound.Metadata().Address, nil)
 						dialRTT := time.Since(dialStart)
+						fellBackToPeer := false
 						if err != nil {
 							// Only register as slow target on timeout (not on
 							// connection refused, DNS failure, etc.)
@@ -124,11 +125,31 @@ func (p *Proxy) relayConnLoop() {
 									p.clusterRouter.RegisterSlowTarget(host, addr.Port, dialRTT)
 								}
 							}
-							log.ErrorKV("proxy failed to dial connection", "target", target, "err", err)
-							return
+							// Emergency fallback: route the in-flight connection
+							// through any alive peer so it isn't dropped while
+							// the urgent probe rebuilds the route table.
+							if p.clusterRouter != nil {
+								if relayConn, peerName, perr := p.clusterRouter.DialAnyPeer(inbound.Metadata().Address); perr == nil && relayConn != nil {
+									log.InfoKV("proxy: emergency peer fallback after local dial failure",
+										"target", target,
+										"peer", peerName,
+										"local_dial_err", err.Error(),
+										"local_dial_ms", dialRTT.Milliseconds())
+									outbound = &clusterConn{Conn: relayConn, addr: inbound.Metadata().Address}
+									exitNode = peerName
+									err = nil
+									fellBackToPeer = true
+								}
+							}
+							if err != nil {
+								log.ErrorKV("proxy failed to dial connection", "target", target, "err", err)
+								return
+							}
 						}
-						// Successful dial — register latency for route optimization
-						if p.clusterRouter != nil {
+						// Successful local dial — register latency for route optimization.
+						// Skip when we fell back to a peer; dialRTT then reflects the
+						// failed local attempt, not a real success.
+						if !fellBackToPeer && p.clusterRouter != nil {
 							addr := inbound.Metadata().Address
 							host := addr.DomainName
 							if host == "" && addr.IP != nil {
