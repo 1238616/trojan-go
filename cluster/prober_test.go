@@ -46,7 +46,7 @@ func TestProberRegisterSlowTarget(t *testing.T) {
 	p := NewProber(ctx, cfg, rt, make(map[string]*PeerDialer), metrics)
 
 	// Above threshold → should register
-	p.RegisterSlowTarget("149.154.175.53", 443, 250*time.Millisecond)
+	p.RegisterSlowTarget("149.154.175.53", 443, 250*time.Millisecond, false)
 
 	if p.DynamicTargetCount() != 1 {
 		t.Fatalf("expected 1 dynamic target, got %d", p.DynamicTargetCount())
@@ -83,7 +83,7 @@ func TestProberRegisterBelowThreshold(t *testing.T) {
 	p := NewProber(ctx, cfg, rt, make(map[string]*PeerDialer), metrics)
 
 	// Below threshold → should NOT register
-	p.RegisterSlowTarget("8.8.8.8", 53, 50*time.Millisecond)
+	p.RegisterSlowTarget("8.8.8.8", 53, 50*time.Millisecond, false)
 
 	if p.DynamicTargetCount() != 0 {
 		t.Fatalf("expected 0 dynamic targets, got %d", p.DynamicTargetCount())
@@ -105,21 +105,19 @@ func TestProberEvictStaleTargets(t *testing.T) {
 	metrics := NewClusterMetrics()
 	p := NewProber(ctx, cfg, rt, make(map[string]*PeerDialer), metrics)
 
-	// Register a target with old timestamp
-	p.dynamicTargets.Store("old:443", &DynamicTarget{
-		Host:        "old",
-		Port:        443,
-		FirstSeenAt: time.Now().Add(-31 * time.Minute), // 31 minutes ago
-		LastDialRTT: 200 * time.Millisecond,
-	})
+	// Register two targets through the normal path (keeps the atomic
+	// counter consistent), then age one past the 30-minute cutoff by
+	// publishing an immutable copy with an old LastSeenAt.
+	p.RegisterSlowTarget("old", 443, 200*time.Millisecond, false)
+	p.RegisterSlowTarget("fresh", 443, 200*time.Millisecond, false)
 
-	// Register a fresh target
-	p.dynamicTargets.Store("fresh:443", &DynamicTarget{
-		Host:        "fresh",
-		Port:        443,
-		FirstSeenAt: time.Now(),
-		LastDialRTT: 200 * time.Millisecond,
-	})
+	v, ok := p.dynamicTargets.Load("old:443")
+	if !ok {
+		t.Fatal("expected old target to be registered")
+	}
+	aged := *v.(*DynamicTarget)
+	aged.LastSeenAt = time.Now().Add(-31 * time.Minute)
+	p.dynamicTargets.Store("old:443", &aged)
 
 	if p.DynamicTargetCount() != 2 {
 		t.Fatalf("expected 2 before eviction, got %d", p.DynamicTargetCount())
@@ -155,16 +153,25 @@ func TestProberDynamicTargetRefresh(t *testing.T) {
 	p := NewProber(ctx, cfg, rt, make(map[string]*PeerDialer), metrics)
 
 	// Register
-	p.RegisterSlowTarget("1.2.3.4", 443, 200*time.Millisecond)
+	firstSeen := time.Now()
+	p.RegisterSlowTarget("1.2.3.4", 443, 200*time.Millisecond, false)
 	time.Sleep(10 * time.Millisecond)
 
 	// Re-register with new RTT → should update
-	p.RegisterSlowTarget("1.2.3.4", 443, 300*time.Millisecond)
+	p.RegisterSlowTarget("1.2.3.4", 443, 300*time.Millisecond, false)
 
 	v, _ := p.dynamicTargets.Load("1.2.3.4:443")
 	dt := v.(*DynamicTarget)
 	if dt.LastDialRTT != 300*time.Millisecond {
 		t.Fatalf("expected refreshed RTT=300ms, got %v", dt.LastDialRTT)
+	}
+	// FirstSeenAt must keep the original registration time (it is
+	// "first seen", not "last seen").
+	if dt.FirstSeenAt.Before(firstSeen.Add(-time.Second)) || dt.FirstSeenAt.After(firstSeen.Add(time.Second)) {
+		t.Fatalf("expected FirstSeenAt preserved around %v, got %v", firstSeen, dt.FirstSeenAt)
+	}
+	if dt.LastSeenAt.Before(dt.FirstSeenAt) {
+		t.Fatalf("expected LastSeenAt >= FirstSeenAt, got %v < %v", dt.LastSeenAt, dt.FirstSeenAt)
 	}
 }
 
@@ -237,9 +244,9 @@ func TestProberStaticTargetParsing(t *testing.T) {
 		ProbeInterval: 120,
 		ProbeTimeout:  3000,
 		Targets: []string{
-			"149.154.175.53",                // bare IP → port 443
-			"cidr:91.108.0.0/16",            // CIDR → skipped for static probe
-			"domain:telegram.org",           // domain → skipped
+			"149.154.175.53",      // bare IP → port 443
+			"cidr:91.108.0.0/16",  // CIDR → skipped for static probe
+			"domain:telegram.org", // domain → skipped
 		},
 	}
 	rt := NewRouteTable("local", 50)

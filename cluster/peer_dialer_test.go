@@ -211,6 +211,75 @@ func TestPeerDialerDefaultWSPath(t *testing.T) {
 	}
 }
 
+// TestTrojanHeaderMuxSessionFormat verifies the session-establishment header
+// uses CMD=Mux (0x7f) toward the well-known MUX_CONN domain, matching what
+// the peer's trojan server routes into its mux channel.
+func TestTrojanHeaderMuxSessionFormat(t *testing.T) {
+	pd := &PeerDialer{
+		name:     "test-peer",
+		passHash: hexSHA224("test-password"),
+	}
+
+	var buf bytes.Buffer
+	addr := tunnel.NewAddressFromHostPort("tcp", muxMagicDomain, 0)
+	if err := pd.writeTrojanHeaderCmd(&fakeWriteConn{buf: &buf}, addr, cmdMux); err != nil {
+		t.Fatalf("writeTrojanHeaderCmd failed: %v", err)
+	}
+	data := buf.Bytes()
+
+	if string(data[:56]) != pd.passHash {
+		t.Fatal("password hash mismatch")
+	}
+	if data[56] != 0x0d || data[57] != 0x0a {
+		t.Fatal("missing CRLF after hash")
+	}
+	if data[58] != cmdMux {
+		t.Fatalf("expected CMD=0x7f (Mux), got 0x%02x", data[58])
+	}
+	if data[59] != 0x03 {
+		t.Fatalf("expected ATYP=0x03 (domain), got 0x%02x", data[59])
+	}
+	domainLen := int(data[60])
+	if got := string(data[61 : 61+domainLen]); got != muxMagicDomain {
+		t.Fatalf("expected domain=%s, got %q", muxMagicDomain, got)
+	}
+	// Trailing CRLF after the port.
+	last := data[len(data)-2:]
+	if last[0] != 0x0d || last[1] != 0x0a {
+		t.Fatal("missing trailing CRLF")
+	}
+}
+
+// TestPeerDialerMuxFallback verifies that when mux is enabled but the peer
+// is unreachable, the mux attempt degrades to the dedicated dial path and
+// fails fast instead of hanging.
+func TestPeerDialerMuxFallback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pd, err := NewPeerDialer(ctx, PeerConfig{
+		Name: "unreachable", Host: "127.0.0.1", Port: 19999, Password: "x",
+		Mux:  PeerMuxConfig{Enabled: true, Concurrency: 4},
+	})
+	if err != nil {
+		t.Fatalf("NewPeerDialer: %v", err)
+	}
+	defer pd.Close()
+
+	if !pd.muxEnable || pd.muxConcurrency != 4 {
+		t.Fatalf("mux config not applied: enable=%v concurrency=%d", pd.muxEnable, pd.muxConcurrency)
+	}
+
+	addr := tunnel.NewAddressFromHostPort("tcp", "1.2.3.4", 443)
+	start := time.Now()
+	if _, err := pd.DialConnWithTimeout(addr, 2*time.Second); err == nil {
+		t.Fatal("expected dial failure against unreachable peer")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("mux fallback path too slow: %v", elapsed)
+	}
+}
+
 // fakeWriteConn captures writes for header format verification.
 type fakeWriteConn struct {
 	buf *bytes.Buffer

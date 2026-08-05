@@ -47,10 +47,10 @@ func TestRouterDialConnNil(t *testing.T) {
 
 func TestRouterDialConnNotInTargets(t *testing.T) {
 	cr := &ClusterRouter{
-		enabled: true,
-		matcher: NewTargetMatcher([]string{"cidr:149.154.160.0/20"}),
+		enabled:    true,
+		matcher:    NewTargetMatcher([]string{"cidr:149.154.160.0/20"}),
 		routeTable: NewRouteTable("local", 50),
-		metrics: NewClusterMetrics(),
+		metrics:    NewClusterMetrics(),
 	}
 
 	// 8.8.8.8 is NOT in 149.154.160.0/20
@@ -357,7 +357,7 @@ func TestRouteTableFastestPeer(t *testing.T) {
 	rt.Update("1.1.1.1:443", "peer-b", 20*time.Millisecond)
 	rt.Update("1.1.1.1:443", "peer-c", 50*time.Millisecond)
 
-	best := rt.FastestPeer("1.1.1.1")
+	best := rt.FastestPeer("1.1.1.1", 443)
 	if best != "peer-b" {
 		t.Fatalf("expected peer-b (fastest), got %q", best)
 	}
@@ -367,7 +367,7 @@ func TestRouteTableFastestPeerIgnoresLocal(t *testing.T) {
 	rt := NewRouteTable("local", 50)
 	rt.Update("1.1.1.1:443", "local", 5*time.Millisecond) // local is fastest
 
-	best := rt.FastestPeer("1.1.1.1")
+	best := rt.FastestPeer("1.1.1.1", 443)
 	if best != "" {
 		t.Fatalf("expected empty (no non-local peer), got %q", best)
 	}
@@ -375,10 +375,10 @@ func TestRouteTableFastestPeerIgnoresLocal(t *testing.T) {
 
 func TestRouteTableFastestPeerIgnoresUnavailable(t *testing.T) {
 	rt := NewRouteTable("local", 50)
-	rt.Update("1.1.1.1:443", "peer-down", -1)             // unavailable
+	rt.Update("1.1.1.1:443", "peer-down", -1) // unavailable
 	rt.Update("1.1.1.1:443", "peer-up", 30*time.Millisecond)
 
-	best := rt.FastestPeer("1.1.1.1")
+	best := rt.FastestPeer("1.1.1.1", 443)
 	if best != "peer-up" {
 		t.Fatalf("expected peer-up, got %q", best)
 	}

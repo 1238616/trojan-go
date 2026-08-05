@@ -4,6 +4,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/p4gefau1t/trojan-go/log"
 	"github.com/p4gefau1t/trojan-go/tunnel"
 )
 
@@ -35,6 +36,8 @@ func NewTargetMatcher(targets []string) *TargetMatcher {
 			_, ipnet, err := net.ParseCIDR(ruleValue)
 			if err == nil {
 				tm.cidrs = append(tm.cidrs, ipnet)
+			} else {
+				log.Warnf("cluster: invalid cidr rule %q, ignored", ruleValue)
 			}
 		case "domain":
 			tm.domains = append(tm.domains, strings.ToLower(ruleValue))
@@ -42,9 +45,16 @@ func NewTargetMatcher(targets []string) *TargetMatcher {
 			ip := net.ParseIP(ruleValue)
 			if ip != nil {
 				tm.ips = append(tm.ips, ip)
+			} else {
+				log.Warnf("cluster: invalid ip rule %q, ignored", ruleValue)
 			}
 		case "geoip", "geosite":
-			// TODO: integrate v2router geo database for full geoip/geosite support
+			// TODO: integrate v2router geo database for full geoip/geosite support.
+			// Until then the rule cannot be honored — tell the operator instead
+			// of silently dropping it.
+			log.Warnf("cluster: %s rule %q is not supported yet, ignored", ruleType, ruleValue)
+		default:
+			log.Warnf("cluster: unknown target rule type %q, ignored", ruleType)
 		}
 	}
 	return tm
@@ -69,14 +79,14 @@ func (tm *TargetMatcher) Match(addr *tunnel.Address) bool {
 		}
 	}
 
-	// Resolve IP for CIDR/IP matching
+	// Resolve IP for CIDR/IP matching. Resolution goes through the shared
+	// short-TTL cache so the matcher, router and fallback path don't each
+	// re-resolve the same domain per connection.
 	ip := addr.IP
 	if ip == nil && addr.DomainName != "" {
-		resolved, err := net.ResolveIPAddr("ip", addr.DomainName)
-		if err != nil {
-			return false
+		if ipStr := resolveTargetIP(addr.DomainName); ipStr != "" {
+			ip = net.ParseIP(ipStr)
 		}
-		ip = resolved.IP
 	}
 
 	if ip == nil {

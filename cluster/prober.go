@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/p4gefau1t/trojan-go/log"
@@ -21,15 +22,36 @@ func (pt ProbeTarget) Key() string {
 	return net.JoinHostPort(pt.Host, strconv.Itoa(pt.Port))
 }
 
-// DynamicTarget is registered by actual traffic when dial RTT exceeds threshold.
+// DynamicTarget is registered by actual traffic when dial RTT exceeds
+// threshold.
+//
+// Instances are immutable after publication: RegisterSlowTarget replaces
+// the whole pointer in dynamicTargets instead of mutating fields in place,
+// because registration runs concurrently from many proxy goroutines while
+// Snapshot() and the eviction loop read the values.
 type DynamicTarget struct {
 	Host        string
 	Port        int
-	FirstSeenAt time.Time
+	FirstSeenAt time.Time // when the target was first registered (never overwritten)
+	LastSeenAt  time.Time // last registration; used for staleness eviction
 	LastDialRTT time.Duration
 }
 
 const maxDynamicTargets = 50
+
+// maxUrgentProbes bounds how many data-path-triggered urgent probes may run
+// at once. A burst of newly blocked targets otherwise fans out into an
+// unbounded number of full tunnel probes.
+const maxUrgentProbes = 3
+
+// peerAliveInfo is the cached result of the last connectivity check for a
+// peer. Snapshot() reads this instead of re-dialing peers on every API
+// request.
+type peerAliveInfo struct {
+	Alive     bool
+	RTT       time.Duration
+	CheckedAt time.Time
+}
 
 // Prober periodically measures latency from each peer (and local) to
 // registered targets. It is fully asynchronous and never blocks data paths.
@@ -40,13 +62,15 @@ type Prober struct {
 	peerDialers      map[string]*PeerDialer
 	staticTargets    []ProbeTarget
 	dynamicTargets   sync.Map // map[string]*DynamicTarget
+	dynamicCount     int32    // atomic; number of entries in dynamicTargets
 	routeTable       *RouteTable
 	interval         time.Duration
 	timeout          time.Duration
 	latencyThreshold time.Duration
 	localName        string
 	metrics          *ClusterMetrics
-	peerAlive        sync.Map // map[string]bool — peer connectivity status
+	peerAlive        sync.Map // map[string]peerAliveInfo — peer connectivity status
+	urgentSem        chan struct{}
 }
 
 func NewProber(ctx context.Context, cfg *Config, routeTable *RouteTable, peerDialers map[string]*PeerDialer, metrics *ClusterMetrics) *Prober {
@@ -97,6 +121,7 @@ func NewProber(ctx context.Context, cfg *Config, routeTable *RouteTable, peerDia
 		latencyThreshold: latencyThreshold,
 		localName:        cfg.NodeName,
 		metrics:          metrics,
+		urgentSem:        make(chan struct{}, maxUrgentProbes),
 	}
 }
 
@@ -113,12 +138,18 @@ func (p *Prober) Stop() {
 }
 
 // RegisterSlowTarget is called from the data path when origin dial RTT
-// exceeds latencyThreshold. It is lock-free (sync.Map) and safe to call
-// from hot paths. When the dial actually timed out (RTT >= dialTimeout),
-// the route table is immediately updated to mark local as unreachable
-// so subsequent connections can relay through a peer without waiting
-// for the next probe cycle.
-func (p *Prober) RegisterSlowTarget(host string, port int, dialRTT time.Duration) {
+// exceeds latencyThreshold, or when the dial failed outright. It is
+// lock-free (sync.Map + atomic counter) and safe to call concurrently from
+// hot paths.
+//
+// dialFailed distinguishes the two callers:
+//   - failed dial (typically a timeout, i.e. the target looks blocked):
+//     the route table is immediately updated to mark local as unreachable
+//     so subsequent connections can relay through a peer without waiting
+//     for the next probe cycle;
+//   - slow but successful dial: the target is registered for probing, but
+//     local stays marked reachable — slow != unreachable.
+func (p *Prober) RegisterSlowTarget(host string, port int, dialRTT time.Duration, dialFailed bool) {
 	if dialRTT < p.latencyThreshold {
 		log.DebugKV("cluster: dial below threshold, skip",
 			"host", host, "port", port,
@@ -127,57 +158,93 @@ func (p *Prober) RegisterSlowTarget(host string, port int, dialRTT time.Duration
 		return
 	}
 	key := net.JoinHostPort(host, strconv.Itoa(port))
+	now := time.Now()
 	isNew := false
-	if _, loaded := p.dynamicTargets.LoadOrStore(key, &DynamicTarget{
-		Host:        host,
-		Port:        port,
-		FirstSeenAt: time.Now(),
-		LastDialRTT: dialRTT,
-	}); loaded {
-		// Existing target — update RTT
-		if v, ok := p.dynamicTargets.Load(key); ok {
-			v.(*DynamicTarget).LastDialRTT = dialRTT
-			v.(*DynamicTarget).FirstSeenAt = time.Now()
-		}
+
+	if v, loaded := p.dynamicTargets.Load(key); loaded {
+		// Existing target — publish an updated immutable copy.
+		// FirstSeenAt is preserved from the original registration.
+		old := v.(*DynamicTarget)
+		updated := *old
+		updated.LastSeenAt = now
+		updated.LastDialRTT = dialRTT
+		p.dynamicTargets.Store(key, &updated)
 	} else {
-		// New target — enforce cap
-		if p.DynamicTargetCount() > maxDynamicTargets {
-			p.dynamicTargets.Delete(key)
+		// New target — reserve a slot against the cap before inserting,
+		// instead of inserting first and deleting afterwards.
+		reserved := false
+		for {
+			cur := atomic.LoadInt32(&p.dynamicCount)
+			if cur >= maxDynamicTargets {
+				break
+			}
+			if atomic.CompareAndSwapInt32(&p.dynamicCount, cur, cur+1) {
+				reserved = true
+				break
+			}
+		}
+		if !reserved {
 			log.DebugKV("cluster: dynamic target cap reached, dropping",
 				"host", host, "port", port,
 				"max", maxDynamicTargets)
 			return
 		}
-		isNew = true
+		if _, loaded := p.dynamicTargets.LoadOrStore(key, &DynamicTarget{
+			Host:        host,
+			Port:        port,
+			FirstSeenAt: now,
+			LastSeenAt:  now,
+			LastDialRTT: dialRTT,
+		}); loaded {
+			// Lost a race with another goroutine — release the slot and
+			// refresh the winner's copy instead.
+			atomic.AddInt32(&p.dynamicCount, -1)
+			if v, ok := p.dynamicTargets.Load(key); ok {
+				old := v.(*DynamicTarget)
+				updated := *old
+				updated.LastSeenAt = now
+				updated.LastDialRTT = dialRTT
+				p.dynamicTargets.Store(key, &updated)
+			}
+		} else {
+			isNew = true
+		}
 	}
 
-	// When dial timed out (>= 5s), immediately mark local as unreachable
-	// in the route table so the next connection can relay through a peer.
-	if dialRTT >= 5*time.Second {
+	if dialFailed {
+		// Local dial failed (timeout): mark local unreachable so the next
+		// connection can relay through a peer immediately.
 		p.routeTable.Update(key, p.localName, -1)
-		log.InfoKV("cluster: dial timeout, local marked unreachable",
+		log.InfoKV("cluster: local dial failed, local marked unreachable",
 			"host", host, "port", port,
 			"dial_rtt_ms", dialRTT.Milliseconds())
 		if isNew {
-			go p.probeTargetAllPeers(ProbeTarget{Host: host, Port: port})
+			// Bound the urgent-probe fan-out: a burst of newly blocked
+			// targets must not spawn an unbounded number of tunnel probes.
+			select {
+			case p.urgentSem <- struct{}{}:
+				go func() {
+					defer func() { <-p.urgentSem }()
+					p.probeTargetAllPeers(ProbeTarget{Host: host, Port: port})
+				}()
+			default:
+				log.DebugKV("cluster: urgent probe deferred (probe slots busy)",
+					"host", host, "port", port)
+			}
 		}
 		return
 	}
 
-	log.InfoKV("cluster: slow target registered",
+	log.DebugKV("cluster: slow target registered",
 		"host", host, "port", port,
 		"dial_rtt_ms", dialRTT.Milliseconds(),
 		"threshold_ms", p.latencyThreshold.Milliseconds())
 }
 
 // DynamicTargetCount returns the number of dynamically registered targets.
+// O(1): backed by an atomic counter maintained on insert/delete.
 func (p *Prober) DynamicTargetCount() int {
-	count := 0
-	p.dynamicTargets.Range(func(_, _ interface{}) bool {
-		count++
-		return true
-	})
-	return count
+	return int(atomic.LoadInt32(&p.dynamicCount))
 }
 
 func (p *Prober) probeLoop() {
@@ -237,7 +304,7 @@ func (p *Prober) probeAll() {
 	}
 
 	start := time.Now()
-	log.Infof("cluster: probing %d targets across %d peers", len(targets), len(p.peers))
+	log.Debugf("cluster: probing %d targets across %d peers", len(targets), len(p.peers))
 
 	// Peer probes go through full tunnel stack (TCP+TLS+WS+Trojan),
 	// so limit concurrency to avoid starving normal mux traffic.
@@ -254,7 +321,7 @@ func (p *Prober) probeAll() {
 			defer wg.Done()
 			rtt := p.probeDirect(target)
 			p.routeTable.Update(target.Key(), p.localName, rtt)
-			log.InfoKV("cluster: probe local",
+			log.DebugKV("cluster: probe local",
 				"target", target.Key(),
 				"rtt_ms", rtt.Milliseconds())
 		}()
@@ -271,9 +338,9 @@ func (p *Prober) probeAll() {
 				if !ok {
 					return
 				}
-				rtt := dialer.Probe(target)
+				rtt := dialer.ProbeWithTimeout(target, p.timeout)
 				p.routeTable.Update(target.Key(), peer.Name, rtt)
-				log.InfoKV("cluster: probe peer",
+				log.DebugKV("cluster: probe peer",
 					"peer", peer.Name,
 					"target", target.Key(),
 					"rtt_ms", rtt.Milliseconds(),
@@ -304,6 +371,8 @@ func (p *Prober) probeDirect(target ProbeTarget) time.Duration {
 }
 
 // probePeerAlive checks connectivity to each peer via TCP+TLS(+WS) handshake.
+// Results (alive flag + RTT + timestamp) are cached so Snapshot() can serve
+// the API without re-dialing every peer.
 func (p *Prober) probePeerAlive() {
 	var wg sync.WaitGroup
 	for _, peer := range p.peers {
@@ -311,15 +380,17 @@ func (p *Prober) probePeerAlive() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			info := peerAliveInfo{CheckedAt: time.Now()}
 			dialer, ok := p.peerDialers[peer.Name]
 			if !ok {
-				p.peerAlive.Store(peer.Name, false)
+				p.peerAlive.Store(peer.Name, info)
 				return
 			}
 			rtt := dialer.CheckAlive(p.timeout)
-			alive := rtt >= 0
-			p.peerAlive.Store(peer.Name, alive)
-			if alive {
+			info.RTT = rtt
+			info.Alive = rtt >= 0
+			p.peerAlive.Store(peer.Name, info)
+			if info.Alive {
 				log.DebugKV("cluster: peer alive", "peer", peer.Name, "rtt_ms", rtt.Milliseconds())
 			} else {
 				log.DebugKV("cluster: peer unreachable", "peer", peer.Name)
@@ -331,11 +402,26 @@ func (p *Prober) probePeerAlive() {
 
 // IsPeerAlive returns whether the peer passed its last connectivity check.
 func (p *Prober) IsPeerAlive(peerName string) bool {
+	info, ok := p.PeerAliveInfo(peerName)
+	return ok && info.Alive
+}
+
+// PeerAliveInfo returns the cached result of the peer's last connectivity
+// check.
+func (p *Prober) PeerAliveInfo(peerName string) (peerAliveInfo, bool) {
 	v, ok := p.peerAlive.Load(peerName)
 	if !ok {
-		return false
+		return peerAliveInfo{}, false
 	}
-	return v.(bool)
+	info, isInfo := v.(peerAliveInfo)
+	if !isInfo {
+		// Legacy bool entry (tests or older code paths).
+		if alive, isBool := v.(bool); isBool {
+			return peerAliveInfo{Alive: alive}, true
+		}
+		return peerAliveInfo{}, false
+	}
+	return info, true
 }
 
 // probeTargetAllPeers probes a single target across all peers in parallel
@@ -352,9 +438,9 @@ func (p *Prober) probeTargetAllPeers(target ProbeTarget) {
 			if !ok {
 				return
 			}
-			rtt := dialer.Probe(target)
+			rtt := dialer.ProbeWithTimeout(target, p.timeout)
 			p.routeTable.Update(target.Key(), peer.Name, rtt)
-			log.InfoKV("cluster: urgent probe peer",
+			log.DebugKV("cluster: urgent probe peer",
 				"peer", peer.Name,
 				"target", target.Key(),
 				"rtt_ms", rtt.Milliseconds(),
@@ -369,8 +455,10 @@ func (p *Prober) evictStaleTargets() {
 	cutoff := time.Now().Add(-30 * time.Minute)
 	p.dynamicTargets.Range(func(key, value interface{}) bool {
 		dt := value.(*DynamicTarget)
-		if dt.FirstSeenAt.Before(cutoff) {
-			p.dynamicTargets.Delete(key)
+		if dt.LastSeenAt.Before(cutoff) {
+			if _, loaded := p.dynamicTargets.LoadAndDelete(key); loaded {
+				atomic.AddInt32(&p.dynamicCount, -1)
+			}
 			log.DebugKV("cluster: evicted stale probe target", "host", dt.Host)
 		}
 		return true

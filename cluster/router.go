@@ -4,12 +4,24 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/p4gefau1t/trojan-go/log"
 	"github.com/p4gefau1t/trojan-go/tunnel"
 )
+
+// addrKey builds the "host:port" identity used for the emergency-fallback
+// negative cache, preferring the dialed domain name.
+func addrKey(addr *tunnel.Address) string {
+	host := addr.DomainName
+	if host == "" && addr.IP != nil {
+		host = addr.IP.String()
+	}
+	return net.JoinHostPort(host, strconv.Itoa(addr.Port))
+}
 
 // trackedConn wraps a relay connection to track active connection count.
 type trackedConn struct {
@@ -26,10 +38,16 @@ func (tc *trackedConn) Close() error {
 	return tc.Conn.Close()
 }
 
+// fallbackNegCacheTTL is how long DialAnyPeer remembers that a target
+// failed through every candidate peer. Within the TTL further emergency
+// fallbacks for the same target short-circuit, so a hot target that is
+// down everywhere doesn't amplify each user connection into N full peer
+// handshakes.
+const fallbackNegCacheTTL = 10 * time.Second
+
 // ClusterRouter is the decision engine that intercepts outbound connections
 // and routes them through optimal peers when beneficial.
 type ClusterRouter struct {
-	mu          sync.RWMutex
 	enabled     bool
 	routeTable  *RouteTable
 	prober      *Prober
@@ -38,6 +56,11 @@ type ClusterRouter struct {
 	metrics     *ClusterMetrics
 	localName   string
 	cfg         *Config
+
+	// fallbackNegCache maps "host:port" to the time until which an
+	// emergency DialAnyPeer for that target should be skipped because the
+	// previous attempt already failed through every alive peer.
+	fallbackNegCache sync.Map
 }
 
 // globalRouter is the singleton accessed by the HTTP API.
@@ -119,6 +142,47 @@ func (cr *ClusterRouter) Stop() {
 	log.Info("cluster: router stopped")
 }
 
+// lookupHosts returns the ordered route-table lookup keys for an address:
+// the dialed host first, then its resolved IP. Dynamic targets are
+// registered under the exact host the client dialed (usually a domain),
+// while static probe targets are IPs, so both spellings must be tried for
+// either kind to match. Resolution is cached (see dns_cache.go), keeping
+// the hot path to at most one cached lookup.
+func lookupHosts(addr *tunnel.Address) []string {
+	if addr.DomainName != "" {
+		hosts := []string{addr.DomainName}
+		if ip := resolveTargetIP(addr.DomainName); ip != "" {
+			hosts = append(hosts, ip)
+		}
+		return hosts
+	}
+	if addr.IP != nil {
+		return []string{addr.IP.String()}
+	}
+	return nil
+}
+
+// bestExitForAddr queries the route table for the best relay peer.
+func (cr *ClusterRouter) bestExitForAddr(addr *tunnel.Address) (string, time.Duration) {
+	for _, host := range lookupHosts(addr) {
+		if peer, gain := cr.routeTable.BestExit(host, addr.Port); peer != "" {
+			return peer, gain
+		}
+	}
+	return "", 0
+}
+
+// fastestPeerForAddr queries the route table for the fastest peer
+// (ForceRelay mode).
+func (cr *ClusterRouter) fastestPeerForAddr(addr *tunnel.Address) string {
+	for _, host := range lookupHosts(addr) {
+		if peer := cr.routeTable.FastestPeer(host, addr.Port); peer != "" {
+			return peer
+		}
+	}
+	return ""
+}
+
 // DialConn is the core decision function.
 // Returns (conn, peerName, nil) if relay is beneficial.
 // Returns (nil, "local", nil) if local direct is optimal.
@@ -151,24 +215,12 @@ func (cr *ClusterRouter) DialConn(addr *tunnel.Address) (net.Conn, string, error
 		}
 	}
 
-	// Resolve IP for route table lookup
-	targetIP := ""
-	if addr.IP != nil {
-		targetIP = addr.IP.String()
-	} else if addr.DomainName != "" {
-		resolved, err := net.ResolveIPAddr("ip", addr.DomainName)
-		if err == nil {
-			targetIP = resolved.IP.String()
-		}
-	}
-	if targetIP == "" {
-		return nil, "local", nil
-	}
-
-	// Query route table
-	bestPeer, gain := cr.routeTable.BestExit(targetIP)
+	// Query route table. lookupHosts returns the dialed host plus (if it's
+	// a domain) its resolved IP, so both static-IP and dynamic-domain
+	// probe entries can match.
+	bestPeer, gain := cr.bestExitForAddr(addr)
 	log.DebugKV("cluster: route table query",
-		"target_ip", targetIP,
+		"target", addr.String(),
 		"best_peer", bestPeer,
 		"gain_ms", gain.Milliseconds(),
 		"has_static_rules", hasStaticRules)
@@ -206,18 +258,7 @@ func (cr *ClusterRouter) dialForceRelay(addr *tunnel.Address) (net.Conn, string,
 	var selectedPeer string
 
 	// Try route-table lookup for best peer with probe data
-	targetIP := ""
-	if addr.IP != nil {
-		targetIP = addr.IP.String()
-	} else if addr.DomainName != "" {
-		resolved, err := net.ResolveIPAddr("ip", addr.DomainName)
-		if err == nil {
-			targetIP = resolved.IP.String()
-		}
-	}
-	if targetIP != "" {
-		selectedPeer = cr.routeTable.FastestPeer(targetIP)
-	}
+	selectedPeer = cr.fastestPeerForAddr(addr)
 
 	// No probe data for this target — pick first available peer
 	if selectedPeer == "" {
@@ -270,28 +311,33 @@ func (cr *ClusterRouter) DialAnyPeer(addr *tunnel.Address) (net.Conn, string, er
 		return nil, "", fmt.Errorf("cluster router not enabled")
 	}
 
+	// Negative cache: if a previous emergency fallback for this exact
+	// target already failed through every candidate within the TTL, fail
+	// fast instead of repeating N full peer handshakes per user
+	// connection while the target is down everywhere.
+	key := addrKey(addr)
+	if v, ok := cr.fallbackNegCache.Load(key); ok {
+		if expiry, isTime := v.(time.Time); isTime {
+			if time.Now().Before(expiry) {
+				return nil, "", fmt.Errorf("cluster: fallback for %s suppressed (all peers failed recently)", key)
+			}
+			cr.fallbackNegCache.Delete(key)
+		}
+	}
+
 	tried := make(map[string]struct{})
 	candidates := make([]string, 0, len(cr.peerDialers)+1)
 
 	// Candidate 1: route-table best exit (if any).
-	targetIP := ""
-	if addr.IP != nil {
-		targetIP = addr.IP.String()
-	} else if addr.DomainName != "" {
-		if resolved, err := net.ResolveIPAddr("ip", addr.DomainName); err == nil {
-			targetIP = resolved.IP.String()
-		}
-	}
-	if targetIP != "" {
-		if best, _ := cr.routeTable.BestExit(targetIP); best != "" {
-			if _, ok := cr.peerDialers[best]; ok {
-				candidates = append(candidates, best)
-				tried[best] = struct{}{}
-			}
+	if best, _ := cr.bestExitForAddr(addr); best != "" {
+		if _, ok := cr.peerDialers[best]; ok {
+			candidates = append(candidates, best)
+			tried[best] = struct{}{}
 		}
 	}
 
-	// Candidate 2..N: alive peers (deduped).
+	// Candidate 2..N: alive peers (deduped, sorted for determinism).
+	peerNames := make([]string, 0, len(cr.peerDialers))
 	for name := range cr.peerDialers {
 		if _, seen := tried[name]; seen {
 			continue
@@ -299,6 +345,10 @@ func (cr *ClusterRouter) DialAnyPeer(addr *tunnel.Address) (net.Conn, string, er
 		if cr.prober != nil && !cr.prober.IsPeerAlive(name) {
 			continue
 		}
+		peerNames = append(peerNames, name)
+	}
+	sort.Strings(peerNames)
+	for _, name := range peerNames {
 		candidates = append(candidates, name)
 		tried[name] = struct{}{}
 	}
@@ -325,8 +375,12 @@ func (cr *ClusterRouter) DialAnyPeer(addr *tunnel.Address) (net.Conn, string, er
 			"peer", name, "target", addr.String())
 		cr.metrics.RecordRelay(name, 0)
 		cr.metrics.RecordRelayOpen(name)
+		cr.fallbackNegCache.Delete(key) // target reachable again — clear any stale negative
 		return &trackedConn{Conn: conn, peerName: name, metrics: cr.metrics}, name, nil
 	}
+
+	// Every candidate failed — suppress retries for this target briefly.
+	cr.fallbackNegCache.Store(key, time.Now().Add(fallbackNegCacheTTL))
 
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no peer dialer available")
@@ -335,12 +389,14 @@ func (cr *ClusterRouter) DialAnyPeer(addr *tunnel.Address) (net.Conn, string, er
 }
 
 // RegisterSlowTarget exposes the prober's dynamic target registration
-// for use in the data path (freedom.Client.DialConn).
-func (cr *ClusterRouter) RegisterSlowTarget(host string, port int, dialRTT time.Duration) {
+// for use in the data path (freedom.Client.DialConn). dialFailed marks
+// the local node unreachable for the target when the dial actually failed
+// (timeout); a slow-but-successful dial must pass false.
+func (cr *ClusterRouter) RegisterSlowTarget(host string, port int, dialRTT time.Duration, dialFailed bool) {
 	if cr == nil || !cr.enabled {
 		return
 	}
-	cr.prober.RegisterSlowTarget(host, port, dialRTT)
+	cr.prober.RegisterSlowTarget(host, port, dialRTT, dialFailed)
 }
 
 // Snapshot returns the current cluster state for the HTTP API.
@@ -365,6 +421,15 @@ func (cr *ClusterRouter) Snapshot() ClusterAPIResponse {
 
 	// Peer status
 	entries := cr.routeTable.GetAllEntries()
+	// Sort target keys so the API output — and the per-peer RTT lists
+	// built below — are deterministic instead of following random map
+	// iteration order.
+	targetKeys := make([]string, 0, len(entries))
+	for k := range entries {
+		targetKeys = append(targetKeys, k)
+	}
+	sort.Strings(targetKeys)
+
 	for _, peer := range cr.cfg.Peers {
 		ps := PeerStatus{
 			Name: peer.Name,
@@ -378,32 +443,38 @@ func (cr *ClusterRouter) Snapshot() ClusterAPIResponse {
 		ps.TotalRelays = peerMetrics.TotalRelays
 		ps.TotalFallbacks = peerMetrics.TotalFallbacks
 
-		// Connection latency from last alive check
-		if dialer, ok := cr.peerDialers[peer.Name]; ok {
-			rtt := dialer.CheckAlive(3 * time.Second)
-			if rtt >= 0 {
-				ps.ConnLatencyMs = float64(rtt.Microseconds()) / 1000.0
-			} else {
-				ps.ConnLatencyMs = -1
+		// Connection latency from the prober's cached alive check. The
+		// prober re-measures every cycle; serving the cache here keeps
+		// /api/cluster from running a serial full-stack handshake per
+		// peer per request. -1 until the first probe lands.
+		ps.ConnLatencyMs = -1
+		if cr.prober != nil {
+			if info, ok := cr.prober.PeerAliveInfo(peer.Name); ok {
+				if info.Alive {
+					ps.ConnLatencyMs = float64(info.RTT.Microseconds()) / 1000.0
+				}
 			}
 		}
 
 		available := false
-		for _, peers := range entries {
-			for _, pl := range peers {
-				if pl.PeerName == peer.Name {
-					if pl.Available {
-						available = true
-					}
-					ps.TargetRTTs = append(ps.TargetRTTs, TargetRTT{
-						Target:    "", // filled below
-						RTTMs:     float64(pl.RTT.Microseconds()) / 1000.0,
-						RawRTTMs:  float64(pl.RawRTT.Microseconds()) / 1000.0,
-						Available: pl.Available,
-					})
-					if ps.LastProbeAt == "" || pl.UpdatedAt.Format(time.RFC3339) > ps.LastProbeAt {
-						ps.LastProbeAt = pl.UpdatedAt.Format(time.RFC3339)
-					}
+		// Single pass over the entries fills target name and RTT together
+		// so they can never end up misaligned.
+		for _, targetKey := range targetKeys {
+			for _, pl := range entries[targetKey] {
+				if pl.PeerName != peer.Name {
+					continue
+				}
+				if pl.Available {
+					available = true
+				}
+				ps.TargetRTTs = append(ps.TargetRTTs, TargetRTT{
+					Target:    targetKey,
+					RTTMs:     float64(pl.RTT.Microseconds()) / 1000.0,
+					RawRTTMs:  float64(pl.RawRTT.Microseconds()) / 1000.0,
+					Available: pl.Available,
+				})
+				if ps.LastProbeAt == "" || pl.UpdatedAt.Format(time.RFC3339) > ps.LastProbeAt {
+					ps.LastProbeAt = pl.UpdatedAt.Format(time.RFC3339)
 				}
 			}
 		}
@@ -412,22 +483,12 @@ func (cr *ClusterRouter) Snapshot() ClusterAPIResponse {
 			ps.Available = cr.prober.IsPeerAlive(peer.Name)
 		}
 
-		// Fill target keys into TargetRTTs
-		i := 0
-		for targetKey, peers := range entries {
-			for _, pl := range peers {
-				if pl.PeerName == peer.Name && i < len(ps.TargetRTTs) {
-					ps.TargetRTTs[i].Target = targetKey
-					i++
-				}
-			}
-		}
-
 		resp.Peers = append(resp.Peers, ps)
 	}
 
 	// Optimized routes
-	for targetKey, peers := range entries {
+	for _, targetKey := range targetKeys {
+		peers := entries[targetKey]
 		var localRTT time.Duration
 		localFound := false
 		localAvailable := false
@@ -465,9 +526,11 @@ func (cr *ClusterRouter) Snapshot() ClusterAPIResponse {
 
 		source := "static"
 		firstSeen := ""
-		if v, ok := cr.prober.dynamicTargets.Load(targetKey); ok {
-			source = "dynamic"
-			firstSeen = v.(*DynamicTarget).FirstSeenAt.Format(time.RFC3339)
+		if cr.prober != nil {
+			if v, ok := cr.prober.dynamicTargets.Load(targetKey); ok {
+				source = "dynamic"
+				firstSeen = v.(*DynamicTarget).FirstSeenAt.Format(time.RFC3339)
+			}
 		}
 
 		resp.OptimizedRoutes = append(resp.OptimizedRoutes, OptimizedRouteEntry{
@@ -484,9 +547,11 @@ func (cr *ClusterRouter) Snapshot() ClusterAPIResponse {
 
 	// Stats
 	stats := cr.metrics.Snapshot()
-	stats.StaticTargets = len(cr.prober.staticTargets)
-	stats.DynamicTargets = cr.prober.DynamicTargetCount()
-	stats.ProbeTargets = stats.StaticTargets + stats.DynamicTargets
+	if cr.prober != nil {
+		stats.StaticTargets = len(cr.prober.staticTargets)
+		stats.DynamicTargets = cr.prober.DynamicTargetCount()
+		stats.ProbeTargets = stats.StaticTargets + stats.DynamicTargets
+	}
 	resp.Stats = stats
 
 	return resp

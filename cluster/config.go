@@ -15,6 +15,15 @@ type PeerSSLConfig struct {
 	Verify bool   `json:"verify" yaml:"verify"`
 }
 
+// PeerMuxConfig enables connection multiplexing toward a peer: one
+// authenticated trojan tunnel (smux session) carries many relay streams,
+// so per-connection TCP+TLS+WS handshakes are amortized away. Requires
+// the peer node to run with mux enabled.
+type PeerMuxConfig struct {
+	Enabled     bool `json:"enabled" yaml:"enabled"`
+	Concurrency int  `json:"concurrency" yaml:"concurrency"` // max streams per session; default 8
+}
+
 type PeerConfig struct {
 	Name      string              `json:"name" yaml:"name"`
 	Host      string              `json:"host" yaml:"host"`
@@ -23,6 +32,7 @@ type PeerConfig struct {
 	Weight    int                 `json:"weight" yaml:"weight"`
 	Websocket PeerWebsocketConfig `json:"websocket" yaml:"websocket"`
 	SSL       PeerSSLConfig       `json:"ssl" yaml:"ssl"`
+	Mux       PeerMuxConfig       `json:"mux" yaml:"mux"`
 }
 
 type Config struct {

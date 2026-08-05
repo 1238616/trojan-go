@@ -36,7 +36,7 @@ Trojan-Go 兼容原版 Trojan 的绝大多数功能，包括但不限于：
 - **实时连接监控与流量仪表盘**，支持 REST API 与 Web UI，可查看每连接速率、15 分钟流量历史曲线
 - **Prometheus 指标导出**，支持外部 Prometheus 抓取，涵盖连接生命周期、吞吐量百分位、TLS 握手、多路复用、splice 零拷贝、TCP RTT/CWND、按用户/按目标统计等 60+ 指标
 - **零拷贝 splice(2) 加速**（仅 Linux），自动对纯 TCP 连接使用内核 splice 转发，避免用户态拷贝，非 TCP 连接自动回退
-- **多节点集群出口优选**，支持配置多个 peer 节点，自动探测延迟并选择最优出口，降低高延迟目标的访问时延
+- **多节点集群出口优选**，支持配置多个 peer 节点，自动探测延迟并选择最优出口，降低高延迟目标的访问时延；支持 peer 隧道多路复用（smux）、紧急回退负缓存与全链路拨号超时保护，路由决策稳定可复现
 - 可插拔传输层，可将 TLS 替换为其他协议或明文传输，同时有完整的 Shadowsocks 混淆插件支持
 - 支持对用户更友好的 YAML 配置文件格式
 
@@ -522,12 +522,18 @@ scrape_configs:
                 "ssl": {
                     "sni": "la.example.com",
                     "verify": true
+                },
+                "mux": {
+                    "enabled": true,
+                    "concurrency": 8
                 }
             }
         ]
     }
 }
 ```
+
+> 其中 `peers[].mux` 为可选优化项：启用后，入口节点到该 peer 的中继连接会复用同一条已认证的 trojan 隧道（基于 smux），省去每次中继的 TCP/TLS 握手开销。对端为 Trojan-Go 服务端时**无需额外配置**即支持（服务端 mux 路径内建）；若对端不支持 mux，入口节点会自动回退为每次中继独立建连，不影响可用性。默认关闭。
 
 **出口节点**（无需配置集群，只需将 peer 密码加入 password 列表）：
 
@@ -586,6 +592,9 @@ cluster:
       ssl:
         sni: la.example.com
         verify: true
+      mux:
+        enabled: true
+        concurrency: 8
 ```
 
 **配置字段说明：**
@@ -593,6 +602,7 @@ cluster:
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `enabled` | bool | `false` | 是否启用集群出口优选 |
+| `force_relay` | bool | `false` | 强制将所有出站流量经最快 peer 中继（跳过目标匹配与本地延迟比较） |
 | `node_name` | string | `"local"` | 本节点名称，用于路由表标识 |
 | `probe_interval` | int | `120` | 探测间隔（秒），最小 60 |
 | `probe_timeout` | int | `3000` | 探测超时（毫秒） |
@@ -615,6 +625,8 @@ cluster:
 | `websocket.path` | string | WebSocket 路径 |
 | `ssl.sni` | string | TLS SNI（默认使用 host） |
 | `ssl.verify` | bool | 是否验证 peer 的 TLS 证书 |
+| `mux.enabled` | bool | 是否对该 peer 启用隧道多路复用（默认 `false`） |
+| `mux.concurrency` | int | 单条 mux 会话的最大并发 stream 数（默认 `8`） |
 
 **工作原理**：
 
@@ -623,6 +635,15 @@ cluster:
 3. RouteTable 使用 EWMA 平滑延迟数据，选择最优出口节点
 4. 当 peer 延迟比本地低超过 `relay_threshold` 时，连接自动通过该 peer 中继
 5. 中继失败时自动回退到本地直连
+6. 本地拨号超时（目标疑似被墙）时立即标记本地不可达并紧急探测各 peer，后续连接无需等待下一个探测周期即可切换中继
+7. （可选）启用 `peers[].mux` 后，中继连接复用已建立的隧道会话，避免每次中继重复握手
+
+**可靠性保障**：
+
+- **确定性路由**：路由选择基于精确的 `host:port` 匹配，结果稳定可复现，不随进程重启或 map 遍历顺序抖动。
+- **拨号超时保护**：到 peer 的每次拨号（TCP/TLS/WS 握手、协议头写入）均有超时上限，半开的 peer 节点不会挂死探测循环或中继。
+- **紧急回退负缓存**：对「所有 peer 均失败」的目标，短时间（10s）内抑制重复的紧急回退，避免热门宕机目标把每个用户连接放大成 N 次全栈握手。
+- **仅失败才判不可达**：慢但成功的本地拨号不会被误判为「本地不可达」，只有真正失败的拨号才触发切换。
 
 启用连接监控后，可通过 `GET /api/cluster` 查看集群路由状态。
 

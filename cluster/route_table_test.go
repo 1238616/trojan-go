@@ -68,7 +68,7 @@ func TestRouteTableBestExitBasic(t *testing.T) {
 	rt.Update("149.154.175.53:443", "la-1", 15*time.Millisecond)
 	rt.Update("149.154.175.53:443", "tokyo-1", 85*time.Millisecond)
 
-	peer, gain := rt.BestExit("149.154.175.53")
+	peer, gain := rt.BestExit("149.154.175.53", 443)
 	if peer != "la-1" {
 		t.Fatalf("expected la-1, got %q", peer)
 	}
@@ -85,7 +85,7 @@ func TestRouteTableBestExitBelowThreshold(t *testing.T) {
 	rt.Update("target:443", "peer-a", 60*time.Millisecond)
 
 	// Gain = 80 - 60 = 20ms < threshold 50ms → no relay
-	peer, _ := rt.BestExit("target")
+	peer, _ := rt.BestExit("target", 443)
 	if peer != "" {
 		t.Fatalf("expected empty (below threshold), got %q", peer)
 	}
@@ -97,7 +97,7 @@ func TestRouteTableBestExitUnavailable(t *testing.T) {
 	rt.Update("target:443", "local", 250*time.Millisecond)
 	rt.Update("target:443", "peer-a", -1) // unavailable
 
-	peer, _ := rt.BestExit("target")
+	peer, _ := rt.BestExit("target", 443)
 	if peer != "" {
 		t.Fatalf("expected empty (peer unavailable), got %q", peer)
 	}
@@ -119,7 +119,7 @@ func TestRouteTableStaleEntry(t *testing.T) {
 	}
 	rt.mu.Unlock()
 
-	peer, _ := rt.BestExit("target")
+	peer, _ := rt.BestExit("target", 443)
 	if peer != "" {
 		t.Fatalf("expected empty (stale entry), got %q", peer)
 	}
@@ -133,7 +133,7 @@ func TestRouteTableMultiplePeers(t *testing.T) {
 	rt.Update("target:443", "peer-b", 50*time.Millisecond)
 	rt.Update("target:443", "peer-c", 200*time.Millisecond)
 
-	peer, gain := rt.BestExit("target")
+	peer, gain := rt.BestExit("target", 443)
 	if peer != "peer-b" {
 		t.Fatalf("expected peer-b (lowest), got %q", peer)
 	}
@@ -152,7 +152,7 @@ func BenchmarkRouteTableBestExit(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rt.BestExit("149.154.175.53")
+		rt.BestExit("149.154.175.53", 443)
 	}
 }
 
@@ -162,7 +162,7 @@ func TestRouteTableNoLocalEntry(t *testing.T) {
 	// Only peer data, no local
 	rt.Update("target:443", "peer-a", 50*time.Millisecond)
 
-	peer, _ := rt.BestExit("target")
+	peer, _ := rt.BestExit("target", 443)
 	if peer != "" {
 		t.Fatalf("expected empty (no local baseline), got %q", peer)
 	}
@@ -199,7 +199,7 @@ func TestRouteTableBestExitLocalUnreachable(t *testing.T) {
 	// Peer can reach the target
 	rt.Update("149.154.175.53:443", "peer-jp", 80*time.Millisecond)
 
-	peer, gain := rt.BestExit("149.154.175.53")
+	peer, gain := rt.BestExit("149.154.175.53", 443)
 	if peer != "peer-jp" {
 		t.Fatalf("expected peer-jp (local unreachable, peer reachable), got %q", peer)
 	}
@@ -218,7 +218,7 @@ func TestRouteTableBestExitLocalUnreachableMultiplePeers(t *testing.T) {
 	rt.Update("target:443", "peer-b", 50*time.Millisecond)
 	rt.Update("target:443", "peer-c", -1) // this peer also can't reach
 
-	peer, gain := rt.BestExit("target")
+	peer, gain := rt.BestExit("target", 443)
 	if peer != "peer-b" {
 		t.Fatalf("expected peer-b (fastest reachable), got %q", peer)
 	}
@@ -234,7 +234,7 @@ func TestRouteTableBestExitLocalAndAllPeersUnreachable(t *testing.T) {
 	rt.Update("target:443", "local", -1)
 	rt.Update("target:443", "peer-a", -1)
 
-	peer, _ := rt.BestExit("target")
+	peer, _ := rt.BestExit("target", 443)
 	if peer != "" {
 		t.Fatalf("expected empty (all unreachable), got %q", peer)
 	}

@@ -3,6 +3,8 @@ package cluster
 import (
 	"math"
 	"net"
+	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -90,15 +92,15 @@ func (rt *RouteTable) Update(targetKey string, peerName string, rtt time.Duratio
 	}
 }
 
-// BestExit returns the best peer for a target IP.
+// BestExit returns the best peer for a target host:port.
 // Returns ("", 0) if local is already optimal or no data available.
 // When local is unreachable but a peer can reach the target, it returns
 // that peer — this is the core cluster routing use case (bypassing blocks).
-func (rt *RouteTable) BestExit(targetIP string) (peerName string, relayGain time.Duration) {
+func (rt *RouteTable) BestExit(targetHost string, targetPort int) (peerName string, relayGain time.Duration) {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 
-	peers := rt.match(targetIP)
+	peers := rt.match(targetHost, targetPort)
 	if len(peers) == 0 {
 		return "", 0
 	}
@@ -148,13 +150,13 @@ func (rt *RouteTable) BestExit(targetIP string) (peerName string, relayGain time
 	return "", 0
 }
 
-// FastestPeer returns the fastest available peer for a target IP,
+// FastestPeer returns the fastest available peer for a target host:port,
 // ignoring local node entirely. Used by ForceRelay mode.
-func (rt *RouteTable) FastestPeer(targetIP string) string {
+func (rt *RouteTable) FastestPeer(targetHost string, targetPort int) string {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 
-	peers := rt.match(targetIP)
+	peers := rt.match(targetHost, targetPort)
 	now := time.Now()
 	var best PeerLatency
 	best.RTT = time.Duration(math.MaxInt64)
@@ -173,20 +175,56 @@ func (rt *RouteTable) FastestPeer(targetIP string) string {
 	return best.PeerName
 }
 
-// match finds entries for a target. Tries exact match first,
-// then falls back to CIDR prefix matching.
-func (rt *RouteTable) match(targetIP string) []PeerLatency {
-	// Try exact "ip:port" keys first
-	for key, peers := range rt.entries {
+// match finds entries for a target. Tries an exact "host:port" match first;
+// if none exists, it falls back to a host-only match that aggregates the
+// entries recorded for the same host on other ports.
+//
+// Both paths are deterministic: the fallback walks keys in sorted order and
+// merges per-peer records by recency, so the result never depends on Go map
+// iteration order (which is randomized per process).
+func (rt *RouteTable) match(targetHost string, targetPort int) []PeerLatency {
+	// Exact "host:port" match.
+	if peers, ok := rt.entries[net.JoinHostPort(targetHost, strconv.Itoa(targetPort))]; ok && len(peers) > 0 {
+		return peers
+	}
+
+	// Host-only fallback: collect every key for this host, in sorted order
+	// so the merge below is stable regardless of map layout.
+	var keys []string
+	for key := range rt.entries {
 		host, _, err := net.SplitHostPort(key)
 		if err != nil {
 			host = key
 		}
-		if host == targetIP {
-			return peers
+		if host == targetHost {
+			keys = append(keys, key)
 		}
 	}
-	return nil
+	if len(keys) == 0 {
+		return nil
+	}
+	sort.Strings(keys)
+
+	// Merge per peer: the most recently updated record wins. Probes for
+	// different ports of the same host may disagree; the freshest
+	// measurement is the best signal, and picking by UpdatedAt keeps the
+	// decision reproducible.
+	merged := make(map[string]PeerLatency)
+	for _, key := range keys {
+		for _, p := range rt.entries[key] {
+			prev, seen := merged[p.PeerName]
+			if !seen || !p.UpdatedAt.Before(prev.UpdatedAt) {
+				merged[p.PeerName] = p
+			}
+		}
+	}
+
+	peers := make([]PeerLatency, 0, len(merged))
+	for _, p := range merged {
+		peers = append(peers, p)
+	}
+	sort.Slice(peers, func(i, j int) bool { return peers[i].PeerName < peers[j].PeerName })
+	return peers
 }
 
 // Prune removes route table entries where all peers are stale.

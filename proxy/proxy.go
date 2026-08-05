@@ -20,6 +20,7 @@ import (
 	"github.com/p4gefau1t/trojan-go/log"
 	"github.com/p4gefau1t/trojan-go/statistic/connmonitor"
 	"github.com/p4gefau1t/trojan-go/tunnel"
+	"github.com/p4gefau1t/trojan-go/tunnel/freedom"
 )
 
 const Name = "PROXY"
@@ -39,6 +40,10 @@ type Proxy struct {
 	profiler       *Profiler
 	clusterRouter  *cluster.ClusterRouter
 	enableZeroCopy bool // splice(2) fast path for TCP→TCP relay
+	// fallbackSlowDial is the "this dial ran to its timeout" heuristic
+	// used when the dial error lost its type information. Wired to the
+	// freedom layer's configured dial timeout (see NewProxyFromConfigData).
+	fallbackSlowDial time.Duration
 }
 
 func (p *Proxy) Run() error {
@@ -113,16 +118,22 @@ func (p *Proxy) relayConnLoop() {
 						dialRTT := time.Since(dialStart)
 						fellBackToPeer := false
 						if err != nil {
-							// Only register as slow target on timeout (not on
-							// connection refused, DNS failure, etc.)
-							if p.clusterRouter != nil && dialRTT >= 5*time.Second {
+							// Only register as blocked/slow target when the
+							// failure looks like a timeout (SYN dropped, i.e.
+							// likely blocked) — not on connection refused or
+							// DNS failure, where the target is simply down
+							// and relaying through a peer can't help.
+							// dialFailed=true marks local unreachable in the
+							// route table so the next connection can relay
+							// through a peer without waiting for a probe cycle.
+							if p.clusterRouter != nil && isTimeoutLikeDial(err, dialRTT, p.fallbackSlowDial) {
 								addr := inbound.Metadata().Address
 								host := addr.DomainName
 								if host == "" && addr.IP != nil {
 									host = addr.IP.String()
 								}
 								if host != "" && !isMuxMagicDomain(host) {
-									p.clusterRouter.RegisterSlowTarget(host, addr.Port, dialRTT)
+									p.clusterRouter.RegisterSlowTarget(host, addr.Port, dialRTT, true)
 								}
 							}
 							// Emergency fallback: route the in-flight connection
@@ -149,6 +160,8 @@ func (p *Proxy) relayConnLoop() {
 						// Successful local dial — register latency for route optimization.
 						// Skip when we fell back to a peer; dialRTT then reflects the
 						// failed local attempt, not a real success.
+						// dialFailed=false: a slow-but-successful dial never marks
+						// local unreachable — slow != blocked.
 						if !fellBackToPeer && p.clusterRouter != nil {
 							addr := inbound.Metadata().Address
 							host := addr.DomainName
@@ -156,7 +169,7 @@ func (p *Proxy) relayConnLoop() {
 								host = addr.IP.String()
 							}
 							if host != "" && !isMuxMagicDomain(host) {
-								p.clusterRouter.RegisterSlowTarget(host, addr.Port, dialRTT)
+								p.clusterRouter.RegisterSlowTarget(host, addr.Port, dialRTT, false)
 							}
 						}
 					}
@@ -441,6 +454,32 @@ func classifyCloseReason(err error) connmonitor.CloseReason {
 	return connmonitor.CloseReasonOther
 }
 
+// isTimeoutLikeDial reports whether a failed local dial looks like a
+// reachability failure (SYN dropped → timeout, the signature of a blocked
+// target) rather than a fast reject (connection refused, DNS failure) where
+// the target is simply down and relaying through a peer can't help.
+//
+// It prefers the error's own timeout signal (which respects whatever dial
+// timeout the transport layer is configured with) and only falls back to
+// comparing dialRTT against the configured slow-dial threshold when the
+// error type was lost by wrapping.
+func isTimeoutLikeDial(err error, dialRTT, slowDial time.Duration) bool {
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	if os.IsTimeout(err) {
+		return true
+	}
+	// Last-resort heuristic for wrapped errors that lost their type: a dial
+	// that consumed the full configured timeout window was almost certainly
+	// blocked rather than refused.
+	return slowDial > 0 && dialRTT >= slowDial
+}
+
 // clusterConn adapts a net.Conn (from cluster relay) to tunnel.Conn.
 type clusterConn struct {
 	net.Conn
@@ -536,12 +575,22 @@ func NewProxyFromConfigData(data []byte, isJSON bool) (*Proxy, error) {
 	// Cluster router: attach if cluster.enabled is true.
 	clusterCfg := config.FromContext(ctx, cluster.Name).(*cluster.TopLevelConfig)
 	if clusterCfg.Cluster.Enabled {
+		// Tie the cluster fallback "slow dial" heuristic to the freedom
+		// layer's configured dial timeout instead of a magic number, so a
+		// real timeout is still recognized when the operator configures a
+		// dial_timeout shorter than the old hardcoded 5s.
+		p.fallbackSlowDial = 5 * time.Second
+		if freedomCfg, ok := config.FromContext(ctx, freedom.Name).(*freedom.Config); ok && freedomCfg != nil && freedomCfg.TCP.DialTimeout > 0 {
+			p.fallbackSlowDial = time.Duration(freedomCfg.TCP.DialTimeout) * time.Second
+		}
+
 		router, crErr := cluster.NewClusterRouter(p.ctx, &clusterCfg.Cluster)
 		if crErr != nil {
 			log.Warn("cluster router init failed: ", crErr)
 		} else if router != nil {
 			p.clusterRouter = router
-			log.Infof("proxy: cluster router enabled, %d peers", len(clusterCfg.Cluster.Peers))
+			log.Infof("proxy: cluster router enabled, %d peers (fallback slow-dial=%s)",
+				len(clusterCfg.Cluster.Peers), p.fallbackSlowDial)
 		}
 	}
 
