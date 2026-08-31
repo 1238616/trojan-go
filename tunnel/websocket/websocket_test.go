@@ -52,8 +52,9 @@ func TestWebsocket(t *testing.T) {
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
-		conn2, err = s.AcceptConn(nil)
-		common.Must(err)
+		var acceptErr error
+		conn2, acceptErr = s.AcceptConn(nil)
+		common.Must(acceptErr)
 		wg.Done()
 	}()
 	time.Sleep(time.Second)
