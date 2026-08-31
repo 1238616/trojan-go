@@ -32,14 +32,13 @@ const (
 
 // Proxy relay connections and packets
 type Proxy struct {
-	sources        []tunnel.Server
-	sink           tunnel.Client
-	ctx            context.Context
-	cancel         context.CancelFunc
-	connSeq        atomic.Int64
-	profiler       *Profiler
-	clusterRouter  *cluster.ClusterRouter
-	enableZeroCopy bool // splice(2) fast path for TCP→TCP relay
+	sources       []tunnel.Server
+	sink          tunnel.Client
+	ctx           context.Context
+	cancel        context.CancelFunc
+	connSeq       atomic.Int64
+	profiler      *Profiler
+	clusterRouter *cluster.ClusterRouter
 	// fallbackSlowDial is the "this dial ran to its timeout" heuristic
 	// used when the dial error lost its type information. Wired to the
 	// freedom layer's configured dial timeout (see NewProxyFromConfigData).
@@ -194,59 +193,6 @@ func (p *Proxy) relayConnLoop() {
 					}()
 
 					var ttfbDone atomic.Bool
-
-					// Splice fast path: when enable_zero_copy is set and
-					// both sides expose a raw TCP FD, use splice(2) to
-					// relay data through a kernel pipe — zero user-space
-					// copies per byte. Byte counting is maintained via
-					// the SpliceRelayCounted callback.
-					if p.enableZeroCopy {
-						srcTCP := extractTCPConn(outbound)
-						dstTCP := extractTCPConn(inbound)
-						if srcTCP != nil && dstTCP != nil {
-							errChan := make(chan error, 2)
-							// Upload: inbound → outbound via splice
-							go func() {
-								_, err := common.SpliceRelayCounted(dstTCP, srcTCP, func(n int64) {
-									entry.AddUpload(n)
-								})
-								errChan <- err
-							}()
-							// Download: outbound → inbound via splice
-							go func() {
-								_, err := common.SpliceRelayCounted(srcTCP, dstTCP, func(n int64) {
-									entry.AddDownload(n)
-									if ttfbDone.CompareAndSwap(false, true) && metrics != nil {
-										metrics.RecordTTFB(time.Since(dialDoneAt))
-									}
-								})
-								errChan <- err
-							}()
-							select {
-							case err = <-errChan:
-								if err != nil {
-									if strings.Contains(err.Error(), "closed pipe") {
-										log.DebugKV("conn relay splice teardown",
-											"conn_id", string(connID),
-											"target", target,
-											"err", err)
-									} else {
-										log.ErrorKV("conn relay splice error", "conn_id", string(connID), "target", target, "err", err)
-									}
-								}
-								closeReason = classifyCloseReason(err)
-							case <-p.ctx.Done():
-								log.DebugKV("shutting down conn relay (splice)", "conn_id", string(connID))
-								return
-							}
-							select {
-							case <-errChan:
-							case <-p.ctx.Done():
-							}
-							log.DebugKV("conn relay ends (splice)", "conn_id", string(connID), "target", target, "exit", exitNode, "reason", closeReason)
-							return
-						}
-					}
 
 					errChan := make(chan error, 2)
 					// inbound -> outbound (upload)
@@ -554,12 +500,6 @@ func NewProxyFromConfigData(data []byte, isJSON bool) (*Proxy, error) {
 		return nil, err
 	}
 
-	// Splice zero-copy: propagate config to the proxy relay loop.
-	if cfg.EnableZeroCopy {
-		p.enableZeroCopy = true
-		log.Info("proxy: enable_zero_copy=true (splice fast path active)")
-	}
-
 	// Debug profiler: attach if config.debug is true.
 	log.Infof("proxy: debug=%v", cfg.Debug)
 	if cfg.Debug {
@@ -595,20 +535,6 @@ func NewProxyFromConfigData(data []byte, isJSON bool) (*Proxy, error) {
 	}
 
 	return p, nil
-}
-
-// extractTCPConn tries to extract a *net.TCPConn from a tunnel.Conn.
-// It checks for *freedom.Conn (via the unwrapper interface) and direct
-// *net.TCPConn. Returns nil when the connection is TLS, mux, or other
-// non-raw-TCP type.
-func extractTCPConn(c tunnel.Conn) *net.TCPConn {
-	type tcpUnwrapper interface {
-		UnwrapTCPConn() *net.TCPConn
-	}
-	if u, ok := c.(tcpUnwrapper); ok {
-		return u.UnwrapTCPConn()
-	}
-	return nil
 }
 
 func isMuxMagicDomain(host string) bool {

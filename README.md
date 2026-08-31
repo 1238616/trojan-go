@@ -34,8 +34,7 @@ Trojan-Go 兼容原版 Trojan 的绝大多数功能，包括但不限于：
 - TLS 指纹伪造，以对抗 GFW 针对 TLS Client Hello 的特征识别
 - 基于 gRPC 的 API 支持，以实现用户管理和速度限制等
 - **实时连接监控与流量仪表盘**，支持 REST API 与 Web UI，可查看每连接速率、15 分钟流量历史曲线
-- **Prometheus 指标导出**，支持外部 Prometheus 抓取，涵盖连接生命周期、吞吐量百分位、TLS 握手、多路复用、splice 零拷贝、TCP RTT/CWND、按用户/按目标统计等 60+ 指标
-- **零拷贝 splice(2) 加速**（仅 Linux），自动对纯 TCP 连接使用内核 splice 转发，避免用户态拷贝，非 TCP 连接自动回退
+- **Prometheus 指标导出**，支持外部 Prometheus 抓取，涵盖连接生命周期、吞吐量百分位、TLS 握手、多路复用、按用户/按目标统计等 60+ 指标
 - **多节点集群出口优选**，支持配置多个 peer 节点，自动探测延迟并选择最优出口，降低高延迟目标的访问时延；支持 peer 隧道多路复用（smux）、紧急回退负缓存与全链路拨号超时保护，路由决策稳定可复现
 - 可插拔传输层，可将 TLS 替换为其他协议或明文传输，同时有完整的 Shadowsocks 混淆插件支持
 - 支持对用户更友好的 YAML 配置文件格式
@@ -442,13 +441,11 @@ scrape_configs:
 | Trojan 认证 | `trojan_auth_total`, `trojan_auth_failed_total` | 认证次数、失败分类、延迟百分位 |
 | 通道水位 | `trojan_channel_depth`, `trojan_channel_cap` | 内部通道深度与容量（按 `name` 标签区分） |
 | 多路复用 | `trojan_mux_streams_active`, `trojan_mux_streams_per_conn_p95` | 活跃 mux 流数、每物理连接流数百分位、队列深度 |
-| 零拷贝 splice | `trojan_splice_bytes_total`, `trojan_splice_fallback_total` | splice(2) 传输字节数、调用次数、回退到用户态拷贝次数 |
-| TCP 遥测 | `trojan_tcp_rtt_p50_us`, `trojan_tcp_cwnd_p95`, `trojan_tcp_loss_total` | TCP RTT（微秒）、拥塞窗口、丢包事件 |
 | 按用户 | `trojan_user_bytes_down_total{hash="abc"}` | 每用户连接数、认证失败、上下行字节（按 `hash` 标签区分） |
 | 按目标 | `trojan_target_dials_total{host="google.com"}` | 每目标拨号次数、失败、上下行字节、延迟百分位 |
 | 数据包流 | `trojan_packet_open_total`, `trojan_packet_pps_p50` | UDP 数据包流开/关、PPS/BPS 百分位 |
 | DNS | `trojan_dns_resolve_total`, `trojan_dns_resolve_p95_ms` | DNS 解析次数、失败数、延迟百分位 |
-| 反压 | `trojan_accept_drops_total`, `trojan_backpressure_events_total` | Accept 丢弃、反压事件计数 |
+| 反压 | `trojan_backpressure_events_total` | 内部通道水位超阈值的反压事件计数 |
 | Go 运行时 | `trojan_go_goroutines`, `trojan_go_heap_alloc_mb`, `trojan_go_gc_pause_last_ms` | goroutine 数、堆内存、GC 暂停 |
 
 > **提示：** 所有带 `_p50` / `_p95` 后缀的指标基于蓄水池采样（4096 样本上限）进行百分位估算，适用于实时观测，非精确统计。
@@ -471,9 +468,6 @@ scrape_configs:
   "tls_handshake_failed": 2,
   "mux_streams_active": 12,
   "mux_streams_total": 340,
-  "splice_bytes_total": 1048576,
-  "tcp_rtt_p50_us": 12000,
-  "tcp_rtt_p95_us": 45000,
   "goroutines": 64,
   "heap_alloc_mb": 12.5
 }

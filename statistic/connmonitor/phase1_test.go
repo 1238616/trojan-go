@@ -74,8 +74,6 @@ func TestMetricsPhase1Snapshot(t *testing.T) {
 		// Phase 3 reservoirs (needed for Snapshot)
 		muxStreamsPerConnRes: newReservoir(64),
 		muxQueueDepthRes:     newReservoir(64),
-		tcpRttRes:            newReservoir(64),
-		tcpCwndRes:           newReservoir(64),
 	}
 	// record some Phase 1 events
 	m.RecordPacketOpen()
@@ -89,7 +87,6 @@ func TestMetricsPhase1Snapshot(t *testing.T) {
 	m.RecordTCPDial(40 * time.Millisecond)
 	m.ObservePacketPerSecond(1000, 8000)
 	m.ObservePacketPerSecond(2000, 16000)
-	m.RecordAcceptDrop()
 	m.RecordBackpressureEvent()
 
 	snap := m.Snapshot()
@@ -110,9 +107,6 @@ func TestMetricsPhase1Snapshot(t *testing.T) {
 	}
 	if snap.DNSResolveFailed != 1 {
 		t.Errorf("DNSResolveFailed=%d, want 1", snap.DNSResolveFailed)
-	}
-	if snap.AcceptDropsTotal != 1 {
-		t.Errorf("AcceptDropsTotal=%d, want 1", snap.AcceptDropsTotal)
 	}
 	if snap.BackpressureEvents != 1 {
 		t.Errorf("BackpressureEvents=%d, want 1", snap.BackpressureEvents)
@@ -137,7 +131,7 @@ func TestMetricsPhase1Snapshot(t *testing.T) {
 		"dns_resolve_total", "dns_resolve_failed",
 		"tcp_dial_p50_ms", "tcp_dial_p95_ms",
 		"packet_pps_p50", "packet_bps_p50",
-		"accept_drops_total", "backpressure_events",
+		"backpressure_events",
 	} {
 		if !strings.Contains(string(raw), `"`+key+`"`) {
 			t.Errorf("snapshot JSON missing key %q", key)
@@ -163,8 +157,6 @@ func TestBackpressureThreshAccessor(t *testing.T) {
 		// Phase 3 reservoirs (needed for Snapshot)
 		muxStreamsPerConnRes: newReservoir(64),
 		muxQueueDepthRes:     newReservoir(64),
-		tcpRttRes:            newReservoir(64),
-		tcpCwndRes:           newReservoir(64),
 	}
 	m.SetBackpressureThresh(0.8)
 	if got := m.BackpressureThresh(); got < 0.8-1e-9 || got > 0.8+1e-9 {
@@ -199,8 +191,6 @@ func TestRecordPacketCloseUnknownReason(t *testing.T) {
 		// Phase 3 reservoirs (needed for Snapshot)
 		muxStreamsPerConnRes: newReservoir(64),
 		muxQueueDepthRes:     newReservoir(64),
-		tcpRttRes:            newReservoir(64),
-		tcpCwndRes:           newReservoir(64),
 	}
 	m.RecordPacketClose(CloseReason(99))
 	snap := m.Snapshot()

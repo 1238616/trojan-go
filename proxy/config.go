@@ -25,19 +25,10 @@ type Config struct {
 	// Zero disables back-pressure accounting.
 	BackpressureThresh float64 `json:"backpressure_thresh" yaml:"backpressure-thresh"`
 
-	// EnablePacketPool turns on the UDP packet-buffer pool. It is
-	// enabled by default; the knob exists so operators can disable it
-	// for debugging without rebuilding.
-	EnablePacketPool *bool `json:"enable_packet_pool" yaml:"enable-packet-pool"`
-
-	// ---- Phase 3 tuning ----
-
-	// EnableZeroCopy turns on the Linux splice(2) fast path for TCP
-	// relays when both sides are plain *net.TCPConn. It is disabled
-	// by default because splice bypasses the countingReader, so byte
-	// accounting is lost unless the proxy is running without the
-	// connection monitor.
-	EnableZeroCopy bool `json:"enable_zero_copy" yaml:"enable-zero-copy"`
+	// NOTE: the former enable_packet_pool knob was removed (issue #7):
+	// the UDP packet-buffer pool is always on and the flag was never
+	// read. The former enable_zero_copy knob was removed together with
+	// the splice fast path (issue #6).
 
 	// ---- Phase 4 tuning ----
 

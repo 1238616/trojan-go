@@ -111,8 +111,6 @@ func TestRecordTLSResumed(t *testing.T) {
 		// Phase 3 reservoirs (needed for Snapshot)
 		muxStreamsPerConnRes: newReservoir(64),
 		muxQueueDepthRes:     newReservoir(64),
-		tcpRttRes:            newReservoir(64),
-		tcpCwndRes:           newReservoir(64),
 	}
 	m.RecordHandshake(HandshakeTLS, true, 10*time.Millisecond)
 	m.RecordTLSResumed()

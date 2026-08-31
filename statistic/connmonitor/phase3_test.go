@@ -154,60 +154,6 @@ func TestMuxQueueDepth(t *testing.T) {
 	}
 }
 
-// ---- Splice metrics ----
-
-func TestSpliceMetrics(t *testing.T) {
-	m := newTestMetrics()
-	m.RecordSplice(4096)
-	m.RecordSplice(2048)
-	m.RecordSpliceFallback()
-
-	if got := m.spliceBytesTotal.Load(); got != 6144 {
-		t.Errorf("spliceBytesTotal=%d want 6144", got)
-	}
-	if got := m.spliceCallsTotal.Load(); got != 2 {
-		t.Errorf("spliceCallsTotal=%d want 2", got)
-	}
-	if got := m.spliceFallbackTotal.Load(); got != 1 {
-		t.Errorf("spliceFallbackTotal=%d want 1", got)
-	}
-
-	snap := m.Snapshot()
-	if snap.SpliceBytesTotal != 6144 {
-		t.Errorf("Snapshot SpliceBytesTotal=%d want 6144", snap.SpliceBytesTotal)
-	}
-}
-
-// ---- TCPInfo / socket telemetry ----
-
-func TestTCPInfoMetrics(t *testing.T) {
-	m := newTestMetrics()
-	m.RecordTCPInfo(5000, 100, 2)  // rtt=5ms, cwnd=100, loss=2
-	m.RecordTCPInfo(10000, 200, 1) // rtt=10ms, cwnd=200, loss=1
-
-	snap := m.Snapshot()
-	if snap.TCPRttP50Us <= 0 {
-		t.Errorf("TCPRttP50Us=%f expected > 0", snap.TCPRttP50Us)
-	}
-	if snap.TCPCwndP50 <= 0 {
-		t.Errorf("TCPCwndP50=%f expected > 0", snap.TCPCwndP50)
-	}
-	if snap.TCPLossTotal != 3 {
-		t.Errorf("TCPLossTotal=%d want 3", snap.TCPLossTotal)
-	}
-}
-
-func TestTCPInfoIgnoresZeroRTT(t *testing.T) {
-	m := newTestMetrics()
-	m.RecordTCPInfo(0, 50, 0) // rtt=0 should be skipped
-	m.RecordTCPInfo(3000, 0, 0)
-	snap := m.Snapshot()
-	// Only one RTT sample (3000), so P50 should be 3000.
-	if snap.TCPRttP50Us != 3000 {
-		t.Errorf("TCPRttP50Us=%f want 3000", snap.TCPRttP50Us)
-	}
-}
-
 // ---- helpers ----
 
 // newTestMetrics returns a fresh Metrics with all reservoirs initialised.
@@ -229,8 +175,6 @@ func newTestMetrics() *Metrics {
 		userCap:              userCapDefault,
 		muxStreamsPerConnRes: newReservoir(metricsHistogramSampleCap),
 		muxQueueDepthRes:     newReservoir(metricsHistogramSampleCap),
-		tcpRttRes:            newReservoir(metricsHistogramSampleCap),
-		tcpCwndRes:           newReservoir(metricsHistogramSampleCap),
 	}
 	return m
 }

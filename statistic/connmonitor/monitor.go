@@ -2,7 +2,6 @@ package connmonitor
 
 import (
 	"math"
-	"net"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -63,11 +62,6 @@ type connEntry struct {
 
 	// scheduled deletion timestamp (unix nano), 0 = not scheduled
 	deleteAfter atomic.Int64
-
-	// Phase 3: raw TCP connection for TCPInfo sampling (nil when
-	// not set or not a *net.TCPConn). Protected by atomic.Pointer
-	// so calcLoop can read without locking.
-	rawConn atomic.Value // stores *net.TCPConn or nil
 }
 
 // AddUpload is the lock-free hot path used by the relay.
@@ -91,28 +85,6 @@ func (e *connEntry) statusString() string {
 		return "active"
 	}
 	return "closed"
-}
-
-// SetRawConn stores a reference to the underlying *net.TCPConn so the
-// calcLoop can periodically sample TCPInfo. Safe to call once after
-// RegisterEntry; the value is read atomically by calcLoop.
-func (e *connEntry) SetRawConn(c *net.TCPConn) {
-	if e == nil {
-		return
-	}
-	e.rawConn.Store(c)
-}
-
-// RawConn returns the stored *net.TCPConn, or nil.
-func (e *connEntry) RawConn() *net.TCPConn {
-	if e == nil {
-		return nil
-	}
-	v := e.rawConn.Load()
-	if v == nil {
-		return nil
-	}
-	return v.(*net.TCPConn)
 }
 
 // TrafficPoint represents a single point in the traffic history timeline.
@@ -287,13 +259,11 @@ func (m *Monitor) GetHistory() []TrafficPoint {
 func (m *Monitor) calcLoop() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	var tickCount int
 	for {
 		select {
 		case <-m.stopCh:
 			return
 		case <-ticker.C:
-			tickCount++
 			now := time.Now()
 			nowNano := now.UnixNano()
 			var totalUp, totalDown float64
@@ -339,30 +309,6 @@ func (m *Monitor) calcLoop() {
 							globalMetrics.RecordBackpressureEvent()
 						}
 					}
-				}
-				// Phase 3: sample TCPInfo every 5 seconds for entries
-				// that have a raw TCP connection reference set.
-				if tickCount%5 == 0 {
-					m.connections.Range(func(_, v interface{}) bool {
-						ent := v.(*connEntry)
-						if ent.statusFlag.Load() != 0 {
-							return true // skip closed
-						}
-						tc := ent.RawConn()
-						if tc == nil {
-							return true
-						}
-						ss, err := SampleTCPInfo(tc)
-						if err != nil || ss == nil {
-							return true
-						}
-						globalMetrics.RecordTCPInfo(
-							float64(ss.RTTUs),
-							float64(ss.SndCwnd),
-							ss.Loss,
-						)
-						return true
-					})
 				}
 			}
 

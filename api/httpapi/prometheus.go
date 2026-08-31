@@ -116,7 +116,6 @@ func emitPrometheus(w io.Writer, s connmonitor.MetricsSnapshot) {
 	}
 
 	// ---- Phase 1: backpressure ----
-	counter("trojan_accept_drops_total", "Accept channel drops", float64(s.AcceptDropsTotal))
 	counter("trojan_backpressure_events_total", "Backpressure events", float64(s.BackpressureEvents))
 
 	// ---- Phase 2: per-target ----
@@ -135,18 +134,6 @@ func emitPrometheus(w io.Writer, s connmonitor.MetricsSnapshot) {
 	gauge("trojan_mux_streams_per_conn_p50", "Mux streams per physical connection P50", s.MuxStreamsPerConnP50)
 	gauge("trojan_mux_streams_per_conn_p95", "Mux streams per physical connection P95", s.MuxStreamsPerConnP95)
 	gauge("trojan_mux_queue_depth_p50", "Mux queue depth P50", s.MuxQueueDepthP50)
-
-	// ---- Phase 3: zero-copy splice ----
-	counter("trojan_splice_bytes_total", "Total bytes relayed via splice(2)", float64(s.SpliceBytesTotal))
-	counter("trojan_splice_calls_total", "Total splice(2) relay calls", float64(s.SpliceCallsTotal))
-	counter("trojan_splice_fallback_total", "Splice fallbacks to userspace copy", float64(s.SpliceFallbackTotal))
-
-	// ---- Phase 3: socket telemetry ----
-	gauge("trojan_tcp_rtt_p50_us", "TCP RTT P50 (microseconds)", s.TCPRttP50Us)
-	gauge("trojan_tcp_rtt_p95_us", "TCP RTT P95 (microseconds)", s.TCPRttP95Us)
-	gauge("trojan_tcp_cwnd_p50", "TCP congestion window P50 (segments)", s.TCPCwndP50)
-	gauge("trojan_tcp_cwnd_p95", "TCP congestion window P95 (segments)", s.TCPCwndP95)
-	counter("trojan_tcp_loss_total", "Total TCP loss events observed", float64(s.TCPLossTotal))
 
 	// ---- Phase 3: per-user metrics ----
 	for _, u := range s.Users {

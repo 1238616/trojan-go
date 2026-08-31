@@ -17,16 +17,6 @@ type Conn struct {
 	net.Conn
 }
 
-// UnwrapTCPConn returns the underlying *net.TCPConn if the embedded
-// net.Conn is one. This allows splice(2) fast paths to extract the raw
-// FD without knowing about the freedom.Conn wrapper.
-func (c *Conn) UnwrapTCPConn() *net.TCPConn {
-	if tc, ok := c.Conn.(*net.TCPConn); ok {
-		return tc
-	}
-	return nil
-}
-
 func (c *Conn) Metadata() *tunnel.Metadata {
 	return nil
 }

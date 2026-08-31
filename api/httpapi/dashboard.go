@@ -222,7 +222,6 @@ const dashboardHTML = `<!DOCTYPE html>
   <div class="metrics-grid">
     <div class="metric-card">
       <h3>Backpressure</h3>
-      <div class="metric-row"><span class="k">Accept Drops</span><span class="v" id="acceptDrops">0</span></div>
       <div class="metric-row"><span class="k">BP Events</span><span class="v" id="bpEvents">0</span></div>
     </div>
     <div class="metric-card">
@@ -632,7 +631,6 @@ function updateMetrics(m) {
   renderTopUsers(m.users);
 
   // Phase 3: Backpressure
-  document.getElementById('acceptDrops').textContent = m.accept_drops_total || 0;
   document.getElementById('bpEvents').textContent = m.backpressure_events || 0;
 
   // Phase 3: Mux

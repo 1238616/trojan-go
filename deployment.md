@@ -27,7 +27,6 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags "full" -trimpath -ldflags="
 | Channel-based data delivery | muxcool download | Eliminates io.Pipe double-copy (one less memcpy per frame) |
 | Peek-based frame read | muxcool server | Avoids alloc for small frames via bufio.Reader.Peek |
 | ReadFrameMetadata stack array | muxcool frame parse | Eliminated binary.Read interface boxing |
-| Splice(2) infrastructure | proxy relay | UnwrapTCPConn + SpliceRelayCounted for zero-copy TCP→TCP |
 | strconv.AppendInt | proxy conn ID | Eliminated fmt.Sprintf per-connection alloc |
 | Redirector DialTimeout | TCP redirect | 10s dial timeout prevents goroutine leak |
 

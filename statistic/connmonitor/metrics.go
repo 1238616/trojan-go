@@ -202,8 +202,7 @@ type Metrics struct {
 	dnsResolveLatRes *reservoir // milliseconds
 	tcpDialLatRes    *reservoir // milliseconds (pure TCP connect, no DNS)
 
-	// ---- Phase 1: back-pressure / accept drops ----
-	acceptDropsTotal   atomic.Uint64
+	// ---- Phase 1: back-pressure ----
 	backpressureEvents atomic.Uint64
 	// backpressureThresh is the fractional channel fill level (0, 1]
 	// above which a backpressure event is recorded. Stored as a float64
@@ -225,16 +224,6 @@ type Metrics struct {
 	muxStreamsTotal      atomic.Uint64
 	muxStreamsPerConnRes *reservoir
 	muxQueueDepthRes     *reservoir
-
-	// ---- Phase 3: zero-copy splice ----
-	spliceBytesTotal    atomic.Uint64
-	spliceCallsTotal    atomic.Uint64
-	spliceFallbackTotal atomic.Uint64
-
-	// ---- Phase 3: socket telemetry ----
-	tcpRttRes    *reservoir // microseconds
-	tcpCwndRes   *reservoir // segments
-	tcpLossTotal atomic.Uint64
 }
 
 var (
@@ -264,8 +253,6 @@ func GlobalMetrics() *Metrics {
 			userCap:              userCapDefault,
 			muxStreamsPerConnRes: newReservoir(metricsHistogramSampleCap),
 			muxQueueDepthRes:     newReservoir(metricsHistogramSampleCap),
-			tcpRttRes:            newReservoir(metricsHistogramSampleCap),
-			tcpCwndRes:           newReservoir(metricsHistogramSampleCap),
 		}
 	})
 	return globalMetrics
@@ -327,32 +314,6 @@ func (m *Metrics) ObserveMuxQueueDepth(n float64) {
 	if n >= 0 {
 		m.muxQueueDepthRes.add(n)
 	}
-}
-
-// ---- Phase 3: zero-copy splice ----
-
-// RecordSplice reports a successful splice operation.
-func (m *Metrics) RecordSplice(bytes int64) {
-	m.spliceCallsTotal.Add(1)
-	if bytes > 0 {
-		m.spliceBytesTotal.Add(uint64(bytes))
-	}
-}
-
-// RecordSpliceFallback reports a splice fallback to userspace copy.
-func (m *Metrics) RecordSpliceFallback() { m.spliceFallbackTotal.Add(1) }
-
-// ---- Phase 3: socket telemetry ----
-
-// RecordTCPInfo samples a TCPInfo observation.
-func (m *Metrics) RecordTCPInfo(rttUs, cwnd float64, loss uint32) {
-	if rttUs > 0 {
-		m.tcpRttRes.add(rttUs)
-	}
-	if cwnd > 0 {
-		m.tcpCwndRes.add(cwnd)
-	}
-	m.tcpLossTotal.Add(uint64(loss))
 }
 
 // RecordOriginDial reports a server -> upstream dial outcome and latency.
@@ -440,10 +401,6 @@ func (m *Metrics) RecordTCPDial(dur time.Duration) {
 		m.tcpDialLatRes.add(float64(dur) / float64(time.Millisecond))
 	}
 }
-
-// RecordAcceptDrop is called when an inbound accept channel is full and
-// the proxy is forced to discard the connection.
-func (m *Metrics) RecordAcceptDrop() { m.acceptDropsTotal.Add(1) }
 
 // RecordBackpressureEvent is called by calcLoop when a registered
 // ChannelGauge exceeds the configured backpressure threshold.
@@ -594,8 +551,7 @@ type MetricsSnapshot struct {
 	// ---- Phase 1: sync.Pool health ----
 	Pools []PoolSample `json:"pools,omitempty"`
 
-	// ---- Phase 1: back-pressure / accept drops ----
-	AcceptDropsTotal   uint64 `json:"accept_drops_total"`
+	// ---- Phase 1: back-pressure ----
 	BackpressureEvents uint64 `json:"backpressure_events"`
 
 	// ---- Phase 2: per-target breakdown ----
@@ -610,18 +566,6 @@ type MetricsSnapshot struct {
 	MuxStreamsPerConnP50 float64 `json:"mux_streams_per_conn_p50"`
 	MuxStreamsPerConnP95 float64 `json:"mux_streams_per_conn_p95"`
 	MuxQueueDepthP50     float64 `json:"mux_queue_depth_p50"`
-
-	// ---- Phase 3: zero-copy splice ----
-	SpliceBytesTotal    uint64 `json:"splice_bytes_total"`
-	SpliceCallsTotal    uint64 `json:"splice_calls_total"`
-	SpliceFallbackTotal uint64 `json:"splice_fallback_total"`
-
-	// ---- Phase 3: socket telemetry ----
-	TCPRttP50Us  float64 `json:"tcp_rtt_p50_us"`
-	TCPRttP95Us  float64 `json:"tcp_rtt_p95_us"`
-	TCPCwndP50   float64 `json:"tcp_cwnd_p50"`
-	TCPCwndP95   float64 `json:"tcp_cwnd_p95"`
-	TCPLossTotal uint64  `json:"tcp_loss_total"`
 }
 
 // Snapshot returns a point-in-time view of all metrics for the dashboard.
@@ -640,8 +584,6 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 	// Phase 3 reservoirs
 	muxPerConnPct := m.muxStreamsPerConnRes.percentiles(0.50, 0.95)
 	muxQDepthPct := m.muxQueueDepthRes.percentiles(0.50, 0.95)
-	tcpRttPct := m.tcpRttRes.percentiles(0.50, 0.95)
-	tcpCwndPct := m.tcpCwndRes.percentiles(0.50, 0.95)
 
 	closeMap := make(map[string]uint64, len(m.closeByReason))
 	for i := range m.closeByReason {
@@ -728,7 +670,6 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		TCPDialP50Ms:        tcpPct[0],
 		TCPDialP95Ms:        tcpPct[1],
 		Pools:               SnapshotPools(),
-		AcceptDropsTotal:    m.acceptDropsTotal.Load(),
 		BackpressureEvents:  m.backpressureEvents.Load(),
 		// Phase 2
 		TopTargets: m.SnapshotTargets(10),
@@ -739,13 +680,5 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		MuxStreamsPerConnP50: muxPerConnPct[0],
 		MuxStreamsPerConnP95: muxPerConnPct[1],
 		MuxQueueDepthP50:     muxQDepthPct[0],
-		SpliceBytesTotal:     m.spliceBytesTotal.Load(),
-		SpliceCallsTotal:     m.spliceCallsTotal.Load(),
-		SpliceFallbackTotal:  m.spliceFallbackTotal.Load(),
-		TCPRttP50Us:          tcpRttPct[0],
-		TCPRttP95Us:          tcpRttPct[1],
-		TCPCwndP50:           tcpCwndPct[0],
-		TCPCwndP95:           tcpCwndPct[1],
-		TCPLossTotal:         m.tcpLossTotal.Load(),
 	}
 }

@@ -30,14 +30,6 @@ func TestEmitPrometheusContainsExpectedSeries(t *testing.T) {
 		MuxStreamsTotal:      120,
 		MuxStreamsPerConnP50: 3.5,
 		MuxStreamsPerConnP95: 8.2,
-		SpliceBytesTotal:     1024000,
-		SpliceCallsTotal:     500,
-		SpliceFallbackTotal:  10,
-		TCPRttP50Us:          2500,
-		TCPRttP95Us:          8000,
-		TCPCwndP50:           100,
-		TCPCwndP95:           200,
-		TCPLossTotal:         3,
 		Users:                []connmonitor.UserSample{{Hash: "abc123", Conns: 50, BytesDown: 99999}},
 	}
 	var buf bytes.Buffer
@@ -58,16 +50,6 @@ func TestEmitPrometheusContainsExpectedSeries(t *testing.T) {
 		"trojan_mux_streams_total 120",
 		"trojan_mux_streams_per_conn_p50 3.5",
 		"trojan_mux_streams_per_conn_p95 8.2",
-		// Phase 3: splice
-		"trojan_splice_bytes_total 1.024e+06",
-		"trojan_splice_calls_total 500",
-		"trojan_splice_fallback_total 10",
-		// Phase 3: socket telemetry
-		"trojan_tcp_rtt_p50_us 2500",
-		"trojan_tcp_rtt_p95_us 8000",
-		"trojan_tcp_cwnd_p50 100",
-		"trojan_tcp_cwnd_p95 200",
-		"trojan_tcp_loss_total 3",
 		// Phase 3: per-user
 		`trojan_user_conns_total{hash="abc123"} 50`,
 		`trojan_user_bytes_down_total{hash="abc123"} 99999`,
@@ -75,6 +57,20 @@ func TestEmitPrometheusContainsExpectedSeries(t *testing.T) {
 	for _, w := range wantContains {
 		if !strings.Contains(out, w) {
 			t.Errorf("Prometheus output missing %q\n--- full output ---\n%s", w, out)
+		}
+	}
+
+	// Series whose Record* methods had no callers were removed together
+	// with their metrics (issue #7): they must not be exported anymore,
+	// otherwise dashboards would show permanently-zero counters.
+	for _, gone := range []string{
+		"trojan_splice_bytes_total", "trojan_splice_calls_total",
+		"trojan_splice_fallback_total", "trojan_accept_drops_total",
+		"trojan_tcp_rtt_p50_us", "trojan_tcp_rtt_p95_us",
+		"trojan_tcp_cwnd_p50", "trojan_tcp_cwnd_p95", "trojan_tcp_loss_total",
+	} {
+		if strings.Contains(out, gone) {
+			t.Errorf("removed series %q must not be exported\n--- full output ---\n%s", gone, out)
 		}
 	}
 }
