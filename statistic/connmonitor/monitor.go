@@ -181,6 +181,15 @@ type Monitor struct {
 	historyPos int
 	historyLen int
 
+	// Reusable per-tick sample buffers, owned exclusively by tick().
+	// Keeping them across ticks means calcLoop's allocations no longer
+	// grow with the number of active connections (issue #8): capacity is
+	// amortised to the high-water mark instead of re-grown every second.
+	upSamples   []float64
+	downSamples []float64
+	pktPps      []float64
+	pktBps      []float64
+
 	stopCh chan struct{}
 	once   sync.Once
 }
@@ -346,84 +355,96 @@ func (m *Monitor) calcLoop() {
 		select {
 		case <-m.stopCh:
 			return
-		case <-ticker.C:
-			now := time.Now()
-			nowNano := now.UnixNano()
-			var totalUp, totalDown float64
-			var activeCount int
-			// Per-second per-connection samples fed into the metrics
-			// reservoirs for P50/P95 throughput estimation.
-			var upSamples, downSamples []float64
-			// Per-second per-UDP-flow samples (packets and bytes) fed
-			// into the packet_pps / packet_bps reservoirs (issue #10).
-			var pktPps, pktBps []float64
-
-			m.connections.Range(func(k, v interface{}) bool {
-				e := v.(*connEntry)
-				// Reap expired closed entries.
-				if e.statusFlag.Load() == 1 {
-					if d := e.deleteAfter.Load(); d > 0 && nowNano >= d {
-						m.connections.Delete(k)
-					}
-					return true
-				}
-				curUp := e.uploadBytes.Load()
-				curDown := e.downloadBytes.Load()
-				lastUp := e.lastUpload.Swap(curUp)
-				lastDown := e.lastDownload.Swap(curDown)
-				up := float64(curUp - lastUp)
-				down := float64(curDown - lastDown)
-				storeFloat64(&e.uploadSpeed, up)
-				storeFloat64(&e.downloadSpeed, down)
-				totalUp += up
-				totalDown += down
-				activeCount++
-				if e.kind == EntryUDP {
-					curPkts := e.packets.Load()
-					lastPkts := e.lastPackets.Swap(curPkts)
-					pktPps = append(pktPps, float64(curPkts-lastPkts))
-					pktBps = append(pktBps, up+down)
-				} else {
-					upSamples = append(upSamples, up)
-					downSamples = append(downSamples, down)
-				}
-				return true
-			})
-
-			// Feed metrics collector (no-op when nobody asked for it yet).
-			// The pointer is loaded atomically: GlobalMetrics() may still
-			// be initialising it concurrently on first use (issue #10).
-			if gm := globalMetricsPtr.Load(); gm != nil {
-				gm.observePerSecond(upSamples, downSamples)
-				for i := range pktPps {
-					gm.ObservePacketPerSecond(pktPps[i], pktBps[i])
-				}
-				// Phase 1: sample registered ChannelGauges and bump the
-				// backpressure event counter when any channel is above
-				// the configured threshold.
-				if thresh := gm.BackpressureThresh(); thresh > 0 {
-					for _, s := range gm.SnapshotChannels() {
-						if s.Cap > 0 && float64(s.Depth)/float64(s.Cap) >= thresh {
-							gm.RecordBackpressureEvent()
-						}
-					}
-				}
-			}
-
-			m.historyMu.Lock()
-			m.history[m.historyPos] = TrafficPoint{
-				Timestamp:     now.Unix(),
-				UploadSpeed:   totalUp,
-				DownloadSpeed: totalDown,
-				ActiveConns:   activeCount,
-			}
-			m.historyPos = (m.historyPos + 1) % historySize
-			if m.historyLen < historySize {
-				m.historyLen++
-			}
-			m.historyMu.Unlock()
+		case now := <-ticker.C:
+			m.tick(now)
 		}
 	}
+}
+
+// tick performs one sampling pass over all connections. It is split out
+// of calcLoop so the per-tick allocation behaviour can be benchmarked
+// directly (issue #8). Only calcLoop (or the benchmark) may call it —
+// the sample buffers are owned by the caller goroutine.
+func (m *Monitor) tick(now time.Time) {
+	nowNano := now.UnixNano()
+	var totalUp, totalDown float64
+	var activeCount int
+	// Per-second per-connection samples fed into the metrics reservoirs
+	// for P50/P95 throughput estimation. Reuse last tick's backing
+	// arrays: steady-state allocations become independent of the
+	// connection count (issue #8).
+	upSamples := m.upSamples[:0]
+	downSamples := m.downSamples[:0]
+	pktPps := m.pktPps[:0]
+	pktBps := m.pktBps[:0]
+
+	m.connections.Range(func(k, v interface{}) bool {
+		e := v.(*connEntry)
+		// Reap expired closed entries.
+		if e.statusFlag.Load() == 1 {
+			if d := e.deleteAfter.Load(); d > 0 && nowNano >= d {
+				m.connections.Delete(k)
+			}
+			return true
+		}
+		curUp := e.uploadBytes.Load()
+		curDown := e.downloadBytes.Load()
+		lastUp := e.lastUpload.Swap(curUp)
+		lastDown := e.lastDownload.Swap(curDown)
+		up := float64(curUp - lastUp)
+		down := float64(curDown - lastDown)
+		storeFloat64(&e.uploadSpeed, up)
+		storeFloat64(&e.downloadSpeed, down)
+		totalUp += up
+		totalDown += down
+		activeCount++
+		if e.kind == EntryUDP {
+			curPkts := e.packets.Load()
+			lastPkts := e.lastPackets.Swap(curPkts)
+			pktPps = append(pktPps, float64(curPkts-lastPkts))
+			pktBps = append(pktBps, up+down)
+		} else {
+			upSamples = append(upSamples, up)
+			downSamples = append(downSamples, down)
+		}
+		return true
+	})
+
+	// Feed metrics collector (no-op when nobody asked for it yet).
+	// The pointer is loaded atomically: GlobalMetrics() may still
+	// be initialising it concurrently on first use (issue #10).
+	if gm := globalMetricsPtr.Load(); gm != nil {
+		gm.observePerSecond(upSamples, downSamples)
+		gm.ObservePacketRates(pktPps, pktBps)
+		// Phase 1: sample registered ChannelGauges and bump the
+		// backpressure event counter when any channel is above
+		// the configured threshold.
+		if thresh := gm.BackpressureThresh(); thresh > 0 {
+			for _, s := range gm.SnapshotChannels() {
+				if s.Cap > 0 && float64(s.Depth)/float64(s.Cap) >= thresh {
+					gm.RecordBackpressureEvent()
+				}
+			}
+		}
+	}
+
+	m.historyMu.Lock()
+	m.history[m.historyPos] = TrafficPoint{
+		Timestamp:     now.Unix(),
+		UploadSpeed:   totalUp,
+		DownloadSpeed: totalDown,
+		ActiveConns:   activeCount,
+	}
+	m.historyPos = (m.historyPos + 1) % historySize
+	if m.historyLen < historySize {
+		m.historyLen++
+	}
+	m.historyMu.Unlock()
+
+	m.upSamples = upSamples
+	m.downSamples = downSamples
+	m.pktPps = pktPps
+	m.pktBps = pktBps
 }
 
 // --- helpers: store/load float64 via atomic.Uint64 ---

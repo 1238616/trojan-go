@@ -100,6 +100,12 @@ func newReservoir(cap int) *reservoir {
 
 func (r *reservoir) add(v float64) {
 	r.mu.Lock()
+	r.addLocked(v)
+	r.mu.Unlock()
+}
+
+// addLocked inserts one sample; the caller must hold r.mu.
+func (r *reservoir) addLocked(v float64) {
 	r.n++
 	if len(r.data) < cap(r.data) {
 		r.data = append(r.data, v)
@@ -110,7 +116,23 @@ func (r *reservoir) add(v float64) {
 		// observability signal.
 		r.data[int(r.n)%cap(r.data)] = v
 	}
-	r.mu.Unlock()
+}
+
+// addManyPositive inserts all positive samples under ONE lock instead of
+// one lock per sample, amortising the mutex across the per-second batch
+// (issue #8: 10k connections used to mean ~20k reservoir locks/s).
+func (r *reservoir) addManyPositive(vs []float64) {
+	if len(vs) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, v := range vs {
+		if v <= 0 {
+			continue
+		}
+		r.addLocked(v)
+	}
 }
 
 func (r *reservoir) percentiles(ps ...float64) []float64 {
@@ -263,6 +285,55 @@ func GlobalMetrics() *Metrics {
 
 // RecordConnOpen is called when a new relay connection enters the proxy.
 func (m *Metrics) RecordConnOpen() { m.connOpenTotal.Add(1) }
+
+// ---- runtime.MemStats cache (issue #8) ----
+//
+// runtime.ReadMemStats stops the world. Both scrape endpoints
+// (/metrics, /api/metrics) used to call it on every request, inserting
+// a global pause at scrape frequency. The copy is now refreshed by a
+// single background goroutine at a fixed cadence; Snapshot reads the
+// cache, decoupling scrape frequency from STW frequency.
+
+// memStatsRefreshInterval bounds how stale the Go runtime memory
+// counters shown on the dashboard may be.
+const memStatsRefreshInterval = 10 * time.Second
+
+var (
+	memStatsCacheMu sync.Mutex
+	memStatsCache   runtime.MemStats
+	memStatsOnce    sync.Once
+)
+
+// startMemStatsRefresher populates the cache synchronously (so even the
+// very first scrape is served from the cache) and then keeps refreshing
+// it in the background for the lifetime of the process.
+func startMemStatsRefresher() {
+	refreshMemStats()
+	go func() {
+		ticker := time.NewTicker(memStatsRefreshInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			refreshMemStats()
+		}
+	}()
+}
+
+func refreshMemStats() {
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms) // the only STW, confined to the background
+	memStatsCacheMu.Lock()
+	memStatsCache = ms
+	memStatsCacheMu.Unlock()
+}
+
+// cachedMemStats returns the most recent background-refreshed copy of
+// runtime.MemStats without stopping the world.
+func cachedMemStats() runtime.MemStats {
+	memStatsOnce.Do(startMemStatsRefresher)
+	memStatsCacheMu.Lock()
+	defer memStatsCacheMu.Unlock()
+	return memStatsCache
+}
 
 // RecordConnClose is called when a relay connection exits, with the reason
 // inferred by the caller from the relay-loop error value.
@@ -438,6 +509,14 @@ func (m *Metrics) ObservePacketPerSecond(pps, bps float64) {
 	}
 }
 
+// ObservePacketRates is the batched form of ObservePacketPerSecond used
+// by Monitor.calcLoop: one lock per reservoir per tick instead of one
+// per UDP flow (issue #8).
+func (m *Metrics) ObservePacketRates(pps, bps []float64) {
+	m.packetPpsRes.addManyPositive(pps)
+	m.packetBpsRes.addManyPositive(bps)
+}
+
 // SnapshotChannels returns a copy of the registered gauges with current
 // depth/cap values.
 type ChannelSample struct {
@@ -467,16 +546,10 @@ func (m *Metrics) SnapshotChannels() []ChannelSample {
 // per-connection throughput delta. It feeds the throughput reservoirs and
 // recomputes the connection-rate gauges.
 func (m *Metrics) observePerSecond(perConnUpBps, perConnDownBps []float64) {
-	for _, v := range perConnUpBps {
-		if v > 0 {
-			m.upBpsRes.add(v)
-		}
-	}
-	for _, v := range perConnDownBps {
-		if v > 0 {
-			m.downBpsRes.add(v)
-		}
-	}
+	// Batched insert: one lock per reservoir per second, not per sample
+	// (issue #8).
+	m.upBpsRes.addManyPositive(perConnUpBps)
+	m.downBpsRes.addManyPositive(perConnDownBps)
 	openNow := m.connOpenTotal.Load()
 	closeNow := m.connCloseTotal.Load()
 	m.openCPS.Store(openNow - m.lastOpenSnap.Swap(openNow))
@@ -616,8 +689,9 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 	}
 	m.trojanAuthFailMu.Unlock()
 
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
+	// Served from the background cache: no stop-the-world on the scrape
+	// path (issue #8).
+	ms := cachedMemStats()
 
 	lastPause := float64(0)
 	if ms.NumGC > 0 {

@@ -279,7 +279,7 @@ func relayPacketDir(a, b tunnel.PacketConn, entry *connmonitor.Entry, upload boo
 	// aliasing issue.
 	bp := getPacketBuf()
 	defer putPacketBuf(bp)
-	buf := *bp
+	buf := bp.buf
 	for {
 		n, metadata, err := a.ReadWithMetadata(buf)
 		if err != nil {
@@ -393,7 +393,7 @@ func relayBidirectional(ctx context.Context, inbound, outbound net.Conn, entry *
 	go func() {
 		buf := getBuf()
 		defer putBuf(buf)
-		_, err := copyBuffer(outbound, &countingReader{reader: inbound, entry: entry, upload: true}, *buf)
+		_, err := copyBuffer(outbound, &countingReader{reader: inbound, entry: entry, upload: true}, buf.buf)
 		errChan <- relayResult{upload: true, err: err}
 	}()
 	// outbound -> inbound (download); also flags first byte for TTFB.
@@ -407,7 +407,7 @@ func relayBidirectional(ctx context.Context, inbound, outbound net.Conn, entry *
 			ttfbStart: dialDoneAt,
 			ttfbDone:  &ttfbDone,
 			metrics:   metrics,
-		}, *buf)
+		}, buf.buf)
 		errChan <- relayResult{upload: false, err: err}
 	}()
 

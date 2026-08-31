@@ -54,13 +54,22 @@ func RelayBufferSize() int { return int(relayBufferSz) }
 // display the hit-rate even before the first Get().
 var tcpPoolStats = connmonitor.RegisterPool("tcp_relay")
 
-// bufferPool is the sync.Pool backing TCP relay buffers. Each element
-// is a *[]byte whose length matches the configured RelayBufferSize.
+// pooledBuffer is one sync.Pool element: the buffer plus a marker
+// recording whether pool.New produced it. Counting the miss at Get time
+// (exactly once, in getBuf) instead of inside New fixes the double
+// count where one miss was recorded as two Gets and the hit-rate was
+// systematically inflated (issue #8). The marker is cleared on Get, so
+// a buffer that survives a Put/Get cycle counts as a hit.
+type pooledBuffer struct {
+	buf   []byte
+	fresh bool
+}
+
+// bufferPool is the sync.Pool backing TCP relay buffers.
 var bufferPool = sync.Pool{
 	New: func() interface{} {
-		tcpPoolStats.OnGet(true) // New == cache miss
 		b := make([]byte, defaultRelayBufferSize)
-		return &b
+		return &pooledBuffer{buf: b, fresh: true}
 	},
 }
 
@@ -69,26 +78,23 @@ var bufferPool = sync.Pool{
 // RelayBufferSize at runtime may see a smaller slice until the pool
 // churns. The slice is re-sliced to the active RelayBufferSize() so that
 // copyBuffer uses exactly the configured amount.
-func getBuf() *[]byte {
-	bp := bufferPool.Get().(*[]byte)
-	b := *bp
-	// Track the hit; we cannot tell isNew directly because sync.Pool's
-	// New already incremented the counter, so here we only bump the
-	// total. The "miss" increment is done inside New().
-	tcpPoolStats.OnGet(false)
+func getBuf() *pooledBuffer {
+	pb := bufferPool.Get().(*pooledBuffer)
+	// Exactly one count per Get: fresh == true means pool.New ran (miss).
+	tcpPoolStats.OnGet(pb.fresh)
+	pb.fresh = false
 	active := RelayBufferSize()
-	if len(b) < active {
+	if len(pb.buf) < active {
 		// Pool element is stale (from before a resize); grow it.
-		nb := make([]byte, active)
-		bp = &nb
+		pb.buf = make([]byte, active)
 	} else {
-		*bp = b[:active]
+		pb.buf = pb.buf[:active]
 	}
-	return bp
+	return pb
 }
 
 // putBuf returns a relay buffer to the pool.
-func putBuf(b *[]byte) {
+func putBuf(b *pooledBuffer) {
 	if b == nil {
 		return
 	}
@@ -109,25 +115,25 @@ const MaxPacketSize = 1024 * 8
 var packetPoolStats = connmonitor.RegisterPool("udp_packet")
 
 // packetBufferPool recycles MaxPacketSize byte slices used by the UDP
-// copyPacket helper. A sync.Pool avoids the per-flow 8 KiB allocation
-// that the legacy implementation performed in the hot path.
+// packet relay. A sync.Pool avoids the per-flow 8 KiB allocation that
+// the legacy implementation performed in the hot path.
 var packetBufferPool = sync.Pool{
 	New: func() interface{} {
-		packetPoolStats.OnGet(true)
 		b := make([]byte, MaxPacketSize)
-		return &b
+		return &pooledBuffer{buf: b, fresh: true}
 	},
 }
 
 // getPacketBuf borrows an 8 KiB packet buffer from the pool.
-func getPacketBuf() *[]byte {
-	bp := packetBufferPool.Get().(*[]byte)
-	packetPoolStats.OnGet(false) // miss counted in New
-	return bp
+func getPacketBuf() *pooledBuffer {
+	pb := packetBufferPool.Get().(*pooledBuffer)
+	packetPoolStats.OnGet(pb.fresh) // exactly one count per Get (issue #8)
+	pb.fresh = false
+	return pb
 }
 
 // putPacketBuf returns a packet buffer to the pool.
-func putPacketBuf(b *[]byte) {
+func putPacketBuf(b *pooledBuffer) {
 	if b == nil {
 		return
 	}
