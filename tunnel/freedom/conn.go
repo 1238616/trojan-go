@@ -17,6 +17,17 @@ type Conn struct {
 	net.Conn
 }
 
+// CloseWrite half-closes the write side of the underlying TCP
+// connection when there is one. The proxy relay uses this to propagate
+// a client's upload EOF to the origin (issue #1), so the origin knows
+// the request is complete instead of waiting for more data.
+func (c *Conn) CloseWrite() error {
+	if tc, ok := c.Conn.(*net.TCPConn); ok {
+		return tc.CloseWrite()
+	}
+	return common.NewError("freedom: half-close requires a raw TCP connection")
+}
+
 func (c *Conn) Metadata() *tunnel.Metadata {
 	return nil
 }

@@ -192,52 +192,7 @@ func (p *Proxy) relayConnLoop() {
 						monitor.UnregisterEntry(entry)
 					}()
 
-					var ttfbDone atomic.Bool
-
-					errChan := make(chan error, 2)
-					// inbound -> outbound (upload)
-					go func() {
-						buf := getBuf()
-						defer putBuf(buf)
-						_, err := copyBuffer(outbound, &countingReader{reader: inbound, entry: entry, upload: true}, *buf)
-						errChan <- err
-					}()
-					// outbound -> inbound (download); also flags first byte for TTFB.
-					go func() {
-						buf := getBuf()
-						defer putBuf(buf)
-						_, err := copyBuffer(inbound, &countingReader{
-							reader:    outbound,
-							entry:     entry,
-							upload:    false,
-							ttfbStart: dialDoneAt,
-							ttfbDone:  &ttfbDone,
-							metrics:   metrics,
-						}, *buf)
-						errChan <- err
-					}()
-					select {
-					case err = <-errChan:
-						if err != nil {
-							if strings.Contains(err.Error(), "closed pipe") {
-								log.DebugKV("conn relay mux teardown",
-									"conn_id", string(connID),
-									"target", target,
-									"err", err)
-							} else {
-								log.ErrorKV("conn relay error", "conn_id", string(connID), "target", target, "err", err)
-							}
-						}
-						closeReason = classifyCloseReason(err)
-					case <-p.ctx.Done():
-						log.DebugKV("shutting down conn relay", "conn_id", string(connID))
-						return
-					}
-					// Drain the second direction so neither goroutine lingers.
-					select {
-					case <-errChan:
-					case <-p.ctx.Done():
-					}
+					closeReason = relayBidirectional(p.ctx, inbound, outbound, entry, metrics, dialDoneAt, string(connID), target)
 					log.DebugKV("conn relay ends", "conn_id", string(connID), "target", target, "exit", exitNode, "reason", closeReason)
 				}(inbound)
 			}
@@ -373,6 +328,113 @@ func (c *countingReader) Read(p []byte) (int, error) {
 		}
 	}
 	return n, err
+}
+
+// relayResult tags which direction of the bidirectional relay finished
+// so the teardown logic can propagate the ending correctly.
+type relayResult struct {
+	upload bool
+	err    error
+}
+
+// relayBidirectional copies data between inbound and outbound in both
+// directions until the relay ends, and returns the reason it ended.
+//
+// Termination semantics (issue #1):
+//
+//   - When the first direction ends with a real error, both ends are
+//     closed immediately so the second goroutine unblocks at once
+//     instead of hanging on Read until TCP keepalive fires (~60s with
+//     the freedom defaults).
+//   - When the first direction ends with a clean EOF, the half-close is
+//     propagated to the opposite connection when it supports CloseWrite
+//     (raw TCP, TLS), letting the remaining direction finish naturally —
+//     e.g. the origin completes and closes its response only after it
+//     has seen the request-side EOF.
+//   - A clean EOF that cannot be signalled to the peer (no CloseWrite
+//     support, e.g. mux/tunnel streams) closes both ends as well: the
+//     peer would otherwise wait for data that is never coming.
+func relayBidirectional(ctx context.Context, inbound, outbound net.Conn, entry *connmonitor.Entry, metrics *connmonitor.Metrics, dialDoneAt time.Time, connID, target string) connmonitor.CloseReason {
+	var ttfbDone atomic.Bool
+	errChan := make(chan relayResult, 2)
+	// inbound -> outbound (upload)
+	go func() {
+		buf := getBuf()
+		defer putBuf(buf)
+		_, err := copyBuffer(outbound, &countingReader{reader: inbound, entry: entry, upload: true}, *buf)
+		errChan <- relayResult{upload: true, err: err}
+	}()
+	// outbound -> inbound (download); also flags first byte for TTFB.
+	go func() {
+		buf := getBuf()
+		defer putBuf(buf)
+		_, err := copyBuffer(inbound, &countingReader{
+			reader:    outbound,
+			entry:     entry,
+			upload:    false,
+			ttfbStart: dialDoneAt,
+			ttfbDone:  &ttfbDone,
+			metrics:   metrics,
+		}, *buf)
+		errChan <- relayResult{upload: false, err: err}
+	}()
+
+	var first relayResult
+	select {
+	case first = <-errChan:
+	case <-ctx.Done():
+		log.DebugKV("shutting down conn relay", "conn_id", connID)
+		return connmonitor.CloseReasonOther
+	}
+	if first.err != nil {
+		if strings.Contains(first.err.Error(), "closed pipe") {
+			log.DebugKV("conn relay mux teardown",
+				"conn_id", connID,
+				"target", target,
+				"err", first.err)
+		} else {
+			log.ErrorKV("conn relay error", "conn_id", connID, "target", target, "err", first.err)
+		}
+	}
+
+	// Decide whether the second direction may finish on its own (clean
+	// EOF + half-close propagated) or whether both ends must be closed
+	// now to guarantee the remaining goroutine unblocks.
+	var propagated bool
+	if first.err == nil {
+		if first.upload {
+			propagated = halfClose(outbound)
+		} else {
+			propagated = halfClose(inbound)
+		}
+	}
+	if !propagated {
+		inbound.Close()
+		outbound.Close()
+	}
+
+	// Wait for the second direction. With the ends closed (or the
+	// half-close signalled to the peer) it cannot outlive the relay by
+	// more than the peer's reaction time.
+	select {
+	case <-errChan:
+	case <-ctx.Done():
+	}
+	return classifyCloseReason(first.err)
+}
+
+// halfClose propagates a write-side EOF to c when the connection
+// supports it (*net.TCPConn, *tls.Conn, freedom.Conn, …). It returns
+// true when the peer will actually observe the EOF, i.e. the relay can
+// leave the opposite direction open and let it end naturally.
+func halfClose(c net.Conn) bool {
+	type closeWriter interface {
+		CloseWrite() error
+	}
+	if cw, ok := c.(closeWriter); ok {
+		return cw.CloseWrite() == nil
+	}
+	return false
 }
 
 // classifyCloseReason maps a relay error to the metrics close-reason enum so
