@@ -12,20 +12,20 @@ type stubLogger struct {
 	level LogLevel
 }
 
-func (l *stubLogger) SetLogLevel(level LogLevel)  { l.level = level }
-func (l *stubLogger) GetLevel() LogLevel          { return l.level }
-func (l *stubLogger) SetOutput(io.Writer)         {}
-func (l *stubLogger) Fatal(v ...interface{})      {}
+func (l *stubLogger) SetLogLevel(level LogLevel)    { l.level = level }
+func (l *stubLogger) GetLevel() LogLevel            { return l.level }
+func (l *stubLogger) SetOutput(io.Writer)           {}
+func (l *stubLogger) Fatal(v ...interface{})        {}
 func (l *stubLogger) Fatalf(string, ...interface{}) {}
-func (l *stubLogger) Error(v ...interface{})      {}
+func (l *stubLogger) Error(v ...interface{})        {}
 func (l *stubLogger) Errorf(string, ...interface{}) {}
-func (l *stubLogger) Warn(v ...interface{})       {}
+func (l *stubLogger) Warn(v ...interface{})         {}
 func (l *stubLogger) Warnf(string, ...interface{})  {}
-func (l *stubLogger) Info(v ...interface{})       {}
+func (l *stubLogger) Info(v ...interface{})         {}
 func (l *stubLogger) Infof(string, ...interface{})  {}
-func (l *stubLogger) Debug(v ...interface{})      {}
+func (l *stubLogger) Debug(v ...interface{})        {}
 func (l *stubLogger) Debugf(string, ...interface{}) {}
-func (l *stubLogger) Trace(v ...interface{})      {}
+func (l *stubLogger) Trace(v ...interface{})        {}
 func (l *stubLogger) Tracef(string, ...interface{}) {}
 
 // withLogger swaps the global logger for the duration of fn and restores

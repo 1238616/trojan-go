@@ -27,15 +27,12 @@ const (
 	Mux       tunnel.Command = 0x7f
 )
 
+// OutboundConn is a trojan outbound connection. Like InboundConn on the
+// server side, per-chunk byte accounting is left to user billing only;
+// the debug-only per-connection counters were removed (issue #9) and the
+// dashboard totals come from the connection monitor entry owned by the
+// proxy layer.
 type OutboundConn struct {
-	// WARNING: do not change the order of these fields.
-	// 64-bit fields that use `sync/atomic` package functions
-	// must be 64-bit aligned on 32-bit systems.
-	// Reference: https://github.com/golang/go/issues/599
-	// Solution: https://github.com/golang/go/issues/11891#issuecomment-433623786
-	sent uint64
-	recv uint64
-
 	metadata          *tunnel.Metadata
 	user              statistic.User
 	headerWrittenOnce sync.Once
@@ -82,7 +79,6 @@ func (c *OutboundConn) Write(p []byte) (int, error) {
 	}
 	n, err := c.Conn.Write(p)
 	c.user.AddTraffic(n, 0)
-	atomic.AddUint64(&c.sent, uint64(n))
 	return n, err
 }
 
@@ -95,12 +91,13 @@ func (c *OutboundConn) Read(p []byte) (int, error) {
 	}
 	n, err := c.Conn.Read(p)
 	c.user.AddTraffic(0, n)
-	atomic.AddUint64(&c.recv, uint64(n))
 	return n, err
 }
 
 func (c *OutboundConn) Close() error {
-	log.Debug("connection to", c.metadata, "closed", "sent:", common.HumanFriendlyTraffic(atomic.LoadUint64(&c.sent)), "recv:", common.HumanFriendlyTraffic(atomic.LoadUint64(&c.recv)))
+	// The per-connection traffic totals are owned by the connection
+	// monitor entry at the proxy layer (issue #9).
+	log.Debug("connection to", c.metadata, "closed")
 	return c.Conn.Close()
 }
 

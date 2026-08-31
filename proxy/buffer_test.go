@@ -43,6 +43,39 @@ func TestSetRelayBufferSizeAlignment(t *testing.T) {
 	SetRelayBufferSize(defaultRelayBufferSize)
 }
 
+// TestBufferPoolMissAllocatesConfiguredSize is the regression test for
+// issue #9: bufferPool.New used to hardcode defaultRelayBufferSize, so
+// with a larger configured relay_buffer_size every pool miss first
+// allocated a throwaway default-sized buffer that getBuf immediately
+// discarded and re-allocated at the target size. New must allocate the
+// active size directly — one allocation, nothing thrown away.
+func TestBufferPoolMissAllocatesConfiguredSize(t *testing.T) {
+	const want = 64 * 1024
+	SetRelayBufferSize(want)
+	defer SetRelayBufferSize(defaultRelayBufferSize)
+
+	// pool.New is exactly what runs on every miss.
+	for i := 0; i < 8; i++ {
+		pb := bufferPool.New().(*pooledBuffer)
+		if len(pb.buf) != want || cap(pb.buf) != want {
+			t.Fatalf("pool miss produced buffer len=%d cap=%d, want %d — throwaway double allocation",
+				len(pb.buf), cap(pb.buf), want)
+		}
+		if !pb.fresh {
+			t.Fatalf("pool miss element not marked fresh, hit-rate counting would break")
+		}
+	}
+
+	// One miss must cost exactly 2 allocations ([]byte + pooledBuffer).
+	// A throwaway intermediate buffer would push this to 3.
+	allocs := testing.AllocsPerRun(50, func() {
+		_ = bufferPool.New()
+	})
+	if allocs > 2 {
+		t.Fatalf("pool miss costs %.1f allocations, want <= 2 (throwaway buffer is back)", allocs)
+	}
+}
+
 // BenchmarkGetPutPacketBuf measures the amortised cost of the UDP
 // packet-buffer pool on the hot path. We expect a hit-rate close to
 // 100% after the first call per goroutine.

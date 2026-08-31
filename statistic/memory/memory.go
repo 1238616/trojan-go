@@ -94,18 +94,24 @@ func (u *User) GetIPLimit() int {
 func (u *User) AddTraffic(sent, recv int) {
 	// Lock-free fast path: load limiter pointers atomically.
 	// In the common no-limit case both pointers are nil and we skip both branches.
-	if sent >= 0 {
+	//
+	// The relay hot path always calls AddTraffic with exactly one
+	// non-zero argument (InboundConn.Read/Write), so the zero side is
+	// skipped entirely (issue #9): this removes one limiter load and one
+	// no-op atomic.AddUint64(x, 0) per relayed chunk. WaitN(ctx, 0) was a
+	// no-op anyway, so shaping semantics are unchanged.
+	if sent > 0 {
 		if l := u.sendLimiter.Load(); l != nil {
 			l.WaitN(u.ctx, sent)
 		}
+		atomic.AddUint64(&u.sent, uint64(sent))
 	}
-	if recv >= 0 {
+	if recv > 0 {
 		if l := u.recvLimiter.Load(); l != nil {
 			l.WaitN(u.ctx, recv)
 		}
+		atomic.AddUint64(&u.recv, uint64(recv))
 	}
-	atomic.AddUint64(&u.sent, uint64(sent))
-	atomic.AddUint64(&u.recv, uint64(recv))
 }
 
 func (u *User) SetSpeedLimit(send, recv int) {

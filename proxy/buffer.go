@@ -11,8 +11,9 @@ import (
 // relays. 32 KiB matches the default io.Copy uses and is a reasonable
 // trade-off between per-call syscall overhead and memory footprint.
 //
-// The value can be overridden at startup via SetRelayBufferSize, which
-// must be called before any getBuf() invocations.
+// The value can be overridden via SetRelayBufferSize. The pool reads the
+// active size on every miss (issue #9), so a later resize is safe; pool
+// elements allocated before the resize are grown on their next getBuf.
 const defaultRelayBufferSize = 32 * 1024
 
 // minRelayBufferSize / maxRelayBufferSize are hard safety bounds applied
@@ -66,9 +67,16 @@ type pooledBuffer struct {
 }
 
 // bufferPool is the sync.Pool backing TCP relay buffers.
+//
+// New allocates the ACTIVE RelayBufferSize(), not the compile-time
+// default (issue #9): with a larger configured relay_buffer_size every
+// miss previously allocated a throwaway defaultRelayBufferSize buffer
+// that getBuf immediately discarded and re-allocated at the target
+// size. Elements created before a runtime resize are still grown
+// lazily by getBuf.
 var bufferPool = sync.Pool{
 	New: func() interface{} {
-		b := make([]byte, defaultRelayBufferSize)
+		b := make([]byte, RelayBufferSize())
 		return &pooledBuffer{buf: b, fresh: true}
 	},
 }

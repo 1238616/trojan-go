@@ -22,7 +22,7 @@ var packetTestSeq atomic.Int64
 // of datagrams from ReadWithMetadata and then blocks like an idle UDP
 // socket until Close.
 type scriptedPacketConn struct {
-	packets   [][]byte        // datagrams delivered in order
+	packets   [][]byte // datagrams delivered in order
 	next      int
 	target    *tunnel.Address // address reported with each datagram (may be nil)
 	written   chan []byte     // copies of datagrams forwarded via WriteWithMetadata
@@ -79,10 +79,10 @@ func (c *scriptedPacketConn) Close() error {
 	return nil
 }
 
-func (c *scriptedPacketConn) LocalAddr() net.Addr                { return drainAddr{} }
-func (c *scriptedPacketConn) SetDeadline(time.Time) error        { return nil }
-func (c *scriptedPacketConn) SetReadDeadline(time.Time) error    { return nil }
-func (c *scriptedPacketConn) SetWriteDeadline(time.Time) error   { return nil }
+func (c *scriptedPacketConn) LocalAddr() net.Addr              { return drainAddr{} }
+func (c *scriptedPacketConn) SetDeadline(time.Time) error      { return nil }
+func (c *scriptedPacketConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *scriptedPacketConn) SetWriteDeadline(time.Time) error { return nil }
 
 func nextPacketFlowID() string {
 	return fmt.Sprintf("udp-relay-%d", packetTestSeq.Add(1))

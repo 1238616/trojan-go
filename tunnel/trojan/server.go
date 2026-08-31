@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/p4gefau1t/trojan-go/api"
@@ -24,11 +23,16 @@ import (
 	"github.com/p4gefau1t/trojan-go/tunnel/singmux"
 )
 
-// InboundConn is a trojan inbound connection
+// InboundConn is a trojan inbound connection.
+//
+// Byte accounting is deliberately limited to the two consumers that need
+// per-chunk updates: user billing (user.AddTraffic) and the per-user
+// dashboard counters (userMetrics). The per-connection totals shown by
+// the dashboard and used for speed sampling are owned by the connection
+// monitor entry registered at the proxy layer; a third, debug-only
+// per-connection counter used to duplicate every chunk here and was
+// removed (issue #9).
 type InboundConn struct {
-	sent uint64
-	recv uint64
-
 	net.Conn
 	auth      statistic.Authenticator
 	user      statistic.User
@@ -47,7 +51,6 @@ func (c *InboundConn) Metadata() *tunnel.Metadata {
 
 func (c *InboundConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
-	atomic.AddUint64(&c.sent, uint64(n))
 	c.user.AddTraffic(n, 0)
 	if c.userMetrics != nil {
 		c.userMetrics.RecordUp(int64(n))
@@ -57,7 +60,6 @@ func (c *InboundConn) Write(p []byte) (int, error) {
 
 func (c *InboundConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
-	atomic.AddUint64(&c.recv, uint64(n))
 	c.user.AddTraffic(0, n)
 	if c.userMetrics != nil {
 		c.userMetrics.RecordDown(int64(n))
@@ -69,9 +71,9 @@ func (c *InboundConn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
 		// Per-connection routine event: Debug, not Info (issue #3). The
-		// traffic totals remain available through the connection monitor.
-		log.Debug("user", c.hash, "from", c.Conn.RemoteAddr(), "tunneling to", c.metadata.Address, "closed",
-			"sent:", common.HumanFriendlyTraffic(atomic.LoadUint64(&c.sent)), "recv:", common.HumanFriendlyTraffic(atomic.LoadUint64(&c.recv)))
+		// per-connection traffic totals remain available through the
+		// connection monitor (issue #9).
+		log.Debug("user", c.hash, "from", c.Conn.RemoteAddr(), "tunneling to", c.metadata.Address, "closed")
 		c.user.DelIP(c.ip)
 		err = c.Conn.Close()
 	})
