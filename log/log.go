@@ -33,6 +33,11 @@ type Logger interface {
 	Tracef(format string, v ...interface{})
 	SetLogLevel(level LogLevel)
 	SetOutput(io.Writer)
+	// GetLevel returns the current threshold so callers can skip
+	// expensive message construction for messages that would be
+	// filtered anyway (issue #3). Implementations must return the same
+	// level their level checks inside Error/Warn/Info/Debug use.
+	GetLevel() LogLevel
 }
 
 var logger Logger = &EmptyLogger{}
@@ -40,6 +45,9 @@ var logger Logger = &EmptyLogger{}
 type EmptyLogger struct{}
 
 func (l *EmptyLogger) SetLogLevel(LogLevel) {}
+
+// GetLevel returns OffLevel: the empty logger emits nothing.
+func (l *EmptyLogger) GetLevel() LogLevel { return OffLevel }
 
 func (l *EmptyLogger) Fatal(v ...interface{}) { os.Exit(1) }
 
@@ -117,6 +125,19 @@ func Fatalf(format string, v ...interface{}) {
 
 func SetLogLevel(level LogLevel) {
 	logger.SetLogLevel(level)
+}
+
+// GetLevel returns the current threshold of the registered logger.
+func GetLevel() LogLevel {
+	return logger.GetLevel()
+}
+
+// LevelEnabled reports whether a message at the given level would be
+// emitted by the registered logger under its current threshold. Message
+// levels map to their thresholds: a Debug message is emitted at
+// AllLevel, an Info message at InfoLevel, and so on.
+func LevelEnabled(level LogLevel) bool {
+	return logger.GetLevel() <= level
 }
 
 func SetOutput(w io.Writer) {

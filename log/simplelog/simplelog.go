@@ -20,6 +20,11 @@ func (l *SimpleLogger) SetLogLevel(level log.LogLevel) {
 	l.logLevel = level
 }
 
+// GetLevel returns the current threshold (issue #3).
+func (l *SimpleLogger) GetLevel() log.LogLevel {
+	return l.logLevel
+}
+
 func (l *SimpleLogger) Fatal(v ...interface{}) {
 	if l.logLevel <= log.FatalLevel {
 		golog.Fatal(v...)

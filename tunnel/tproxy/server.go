@@ -51,7 +51,7 @@ func (s *Server) AcceptConn(tunnel.Tunnel) (tunnel.Conn, error) {
 	}
 	address, err := tunnel.NewAddressFromAddr("tcp", dst.String())
 	common.Must(err)
-	log.Info("tproxy connection from", conn.RemoteAddr().String(), "metadata", dst.String())
+	log.Debug("tproxy connection from", conn.RemoteAddr().String(), "metadata", dst.String())
 	return &Conn{
 		metadata: &tunnel.Metadata{
 			Address: address,
@@ -118,7 +118,7 @@ func (s *Server) packetDispatchLoop() {
 			s.mapping[info.src.String()] = conn
 			s.mappingLock.Unlock()
 
-			log.Info("new tproxy udp session from", info.src.String(), "metadata", info.dst.String())
+			log.Debug("new tproxy udp session from", info.src.String(), "metadata", info.dst.String())
 			s.packetChan <- conn
 
 			go func(conn *PacketConn) {
@@ -185,7 +185,7 @@ func (s *Server) packetDispatchLoop() {
 func (s *Server) AcceptPacket(tunnel.Tunnel) (tunnel.PacketConn, error) {
 	select {
 	case conn := <-s.packetChan:
-		log.Info("tproxy packet conn accepted")
+		log.Debug("tproxy packet conn accepted")
 		return conn, nil
 	case <-s.ctx.Done():
 		return nil, io.EOF

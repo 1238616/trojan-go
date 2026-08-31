@@ -100,7 +100,7 @@ func (c *OutboundConn) Read(p []byte) (int, error) {
 }
 
 func (c *OutboundConn) Close() error {
-	log.Info("connection to", c.metadata, "closed", "sent:", common.HumanFriendlyTraffic(atomic.LoadUint64(&c.sent)), "recv:", common.HumanFriendlyTraffic(atomic.LoadUint64(&c.recv)))
+	log.Debug("connection to", c.metadata, "closed", "sent:", common.HumanFriendlyTraffic(atomic.LoadUint64(&c.sent)), "recv:", common.HumanFriendlyTraffic(atomic.LoadUint64(&c.recv)))
 	return c.Conn.Close()
 }
 

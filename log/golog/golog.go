@@ -114,6 +114,12 @@ func (l *Logger) SetLogLevel(level log.LogLevel) {
 	atomic.StoreInt32(&l.logLevel, int32(level))
 }
 
+// GetLevel returns the current threshold without taking the write lock
+// (issue #3): KV helpers call this before formatting every message.
+func (l *Logger) GetLevel() log.LogLevel {
+	return log.LogLevel(atomic.LoadInt32(&l.logLevel))
+}
+
 func (l *Logger) SetOutput(w io.Writer) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

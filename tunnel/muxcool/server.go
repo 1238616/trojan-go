@@ -38,7 +38,7 @@ func (s *Server) acceptConnWorker() {
 func (s *Server) handleConn(conn tunnel.Conn) {
 	defer conn.Close()
 
-	log.Info("muxcool: new connection from ", conn.RemoteAddr())
+	log.Debug("muxcool: new connection from ", conn.RemoteAddr())
 
 	reader := bufio.NewReader(conn)
 	sessions := make(map[uint16]*MuxCoolConn)
@@ -65,7 +65,7 @@ func (s *Server) handleConn(conn tunnel.Conn) {
 
 		switch meta.SessionStatus {
 		case SessionStatusNew:
-			log.Info("muxcool: new session id=", meta.SessionID,
+			log.Debug("muxcool: new session id=", meta.SessionID,
 				" target=", meta.Target, " network=", meta.Network)
 
 			if meta.Network == "udp" {

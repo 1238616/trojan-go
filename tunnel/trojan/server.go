@@ -68,7 +68,9 @@ func (c *InboundConn) Read(p []byte) (int, error) {
 func (c *InboundConn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
-		log.Info("user", c.hash, "from", c.Conn.RemoteAddr(), "tunneling to", c.metadata.Address, "closed",
+		// Per-connection routine event: Debug, not Info (issue #3). The
+		// traffic totals remain available through the connection monitor.
+		log.Debug("user", c.hash, "from", c.Conn.RemoteAddr(), "tunneling to", c.metadata.Address, "closed",
 			"sent:", common.HumanFriendlyTraffic(atomic.LoadUint64(&c.sent)), "recv:", common.HumanFriendlyTraffic(atomic.LoadUint64(&c.recv)))
 		c.user.DelIP(c.ip)
 		err = c.Conn.Close()
@@ -200,7 +202,9 @@ func (s *Server) acceptLoop() {
 			}
 
 			rewindConn.StopBuffering()
-			log.Info("trojan conn from ", conn.RemoteAddr(),
+			// Per-connection routine events log at Debug (issue #3);
+			// authentication failures stay at Warn above.
+			log.Debug("trojan conn from ", conn.RemoteAddr(),
 				" cmd=", inboundConn.metadata.Command,
 				" domain=", inboundConn.metadata.DomainName,
 				" port=", inboundConn.metadata.Port,
@@ -209,13 +213,13 @@ func (s *Server) acceptLoop() {
 			case Connect:
 				if inboundConn.metadata.DomainName == "MUX_CONN" {
 					s.muxChan <- inboundConn
-					log.Info("trojan: routed to muxChan (trojan-go mux)")
+					log.Debug("trojan: routed to muxChan (trojan-go mux)")
 				} else if inboundConn.metadata.DomainName == singmux.MagicDomain {
 					s.singMuxChan <- inboundConn
-					log.Info("trojan: routed to singMuxChan (sing-mux)")
+					log.Debug("trojan: routed to singMuxChan (sing-mux)")
 				} else if inboundConn.metadata.DomainName == muxcool.MagicDomain {
 					s.muxCoolChan <- inboundConn
-					log.Info("trojan: routed to muxCoolChan (mux.cool)")
+					log.Debug("trojan: routed to muxCoolChan (mux.cool)")
 				} else {
 					s.connChan <- inboundConn
 					log.Debug("normal trojan connection")
@@ -228,7 +232,7 @@ func (s *Server) acceptLoop() {
 				log.Debug("trojan udp connection")
 			case Mux:
 				s.muxChan <- inboundConn
-				log.Info("trojan: routed to muxChan (cmd=Mux 0x7f)")
+				log.Debug("trojan: routed to muxChan (cmd=Mux 0x7f)")
 			default:
 				log.Error(common.NewError(fmt.Sprintf("unknown trojan command %d", inboundConn.metadata.Command)))
 			}

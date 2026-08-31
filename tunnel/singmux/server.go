@@ -35,14 +35,14 @@ func (s *Server) acceptConnWorker() {
 func (s *Server) handleConn(conn tunnel.Conn) {
 	defer conn.Close()
 
-	log.Info("singmux: handleConn started, reading Request header from ", conn.RemoteAddr())
+	log.Debug("singmux: handleConn started, reading Request header from ", conn.RemoteAddr())
 
 	req, err := ReadRequest(conn)
 	if err != nil {
 		log.Error("singmux: read request failed: ", err, " from=", conn.RemoteAddr())
 		return
 	}
-	log.Info("singmux: new session protocol=", ProtocolName(req.Protocol),
+	log.Debug("singmux: new session protocol=", ProtocolName(req.Protocol),
 		" version=", req.Version, " padding=", req.Padding,
 		" from=", conn.RemoteAddr())
 
@@ -51,20 +51,21 @@ func (s *Server) handleConn(conn tunnel.Conn) {
 		log.Error("singmux: create session failed: ", err, " protocol=", ProtocolName(req.Protocol))
 		return
 	}
-	log.Info("singmux: session created, accepting streams...")
+	log.Debug("singmux: session created, accepting streams...")
 	defer session.Close()
 
 	for {
 		stream, err := session.Accept()
 		if err != nil {
 			if !session.IsClosed() {
+				// Anomalous teardown keeps Info (issue #3).
 				log.Info("singmux: accept stream error: ", err)
 			} else {
 				log.Debug("singmux: session closed")
 			}
 			return
 		}
-		log.Info("singmux: new stream accepted, reading StreamRequest...")
+		log.Debug("singmux: new stream accepted, reading StreamRequest...")
 		go s.handleStream(stream, conn)
 	}
 }
@@ -77,7 +78,7 @@ func (s *Server) handleStream(stream net.Conn, conn tunnel.Conn) {
 		return
 	}
 
-	log.Info("singmux: stream target=", streamReq.Address, " network=", streamReq.Network)
+	log.Debug("singmux: stream target=", streamReq.Address, " network=", streamReq.Network)
 
 	if streamReq.Network == "udp" {
 		log.Warn("singmux: UDP stream not supported, closing")

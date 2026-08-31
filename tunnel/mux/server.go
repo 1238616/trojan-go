@@ -35,9 +35,9 @@ func (s *Server) acceptConnWorker() {
 			}
 			continue
 		}
-		log.Info("mux: accepted conn from ", conn.RemoteAddr())
+		log.Debug("mux: accepted conn from ", conn.RemoteAddr())
 		if m := conn.Metadata(); m != nil && m.Address != nil {
-			log.Info("mux: conn metadata domain=", m.DomainName, " port=", m.Port)
+			log.Debug("mux: conn metadata domain=", m.DomainName, " port=", m.Port)
 		}
 		go func(conn tunnel.Conn) {
 			smuxConfig := smux.DefaultConfig()

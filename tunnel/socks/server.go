@@ -155,13 +155,13 @@ func (s *Server) packetDispatchLoop() {
 						}
 						log.Debug("socks respond udp packet to", src, "metadata", info.metadata)
 					case <-time.After(time.Second * 5):
-						log.Info("socks udp session timeout, closed")
+						log.Debug("socks udp session timeout, closed")
 						s.mappingLock.Lock()
 						delete(s.mapping, src.String())
 						s.mappingLock.Unlock()
 						return
 					case <-conn.ctx.Done():
-						log.Info("socks udp session closed")
+						log.Debug("socks udp session closed")
 						return
 					}
 				}
@@ -172,7 +172,7 @@ func (s *Server) packetDispatchLoop() {
 			s.mappingLock.Unlock()
 
 			s.packetChan <- conn
-			log.Info("socks new udp session from", src)
+			log.Debug("socks new udp session from", src)
 		}
 		r := bytes.NewBuffer(buf[3:n])
 		address := new(tunnel.Address)
@@ -208,7 +208,7 @@ func (s *Server) acceptLoop() {
 				log.Error(common.NewError("socks failed to handshake with client").Base(err))
 				return
 			}
-			log.Info("socks connection from", conn.RemoteAddr(), "metadata", newConn.metadata.String())
+			log.Debug("socks connection from", conn.RemoteAddr(), "metadata", newConn.metadata.String())
 			switch newConn.metadata.Command {
 			case Connect:
 				if err := s.connect(newConn); err != nil {

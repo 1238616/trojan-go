@@ -77,14 +77,14 @@ func (c *Client) cleanLoop() {
 				if info.client.IsClosed() {
 					toDelete = append(toDelete, id)
 					info.underlayConn.Close()
-					log.Info("mux client", id, "is dead")
+					log.Debug("mux client", id, "is dead")
 					continue
 				}
 				if info.client.NumStreams() == 0 && time.Since(info.lastActiveTime) > c.timeout {
 					toDelete = append(toDelete, id)
 					info.client.Close()
 					info.underlayConn.Close()
-					log.Info("mux client", id, "is closed due to inactivity")
+					log.Debug("mux client", id, "is closed due to inactivity")
 					continue
 				}
 				snapshot = append(snapshot, info)
@@ -200,7 +200,7 @@ func (c *Client) DialConn(*tunnel.Address, tunnel.Tunnel) (tunnel.Conn, error) {
 	for _, info := range c.clientPool {
 		if info.client.IsClosed() {
 			delete(c.clientPool, info.id)
-			log.Info(fmt.Sprintf("Mux client %x is closed", info.id))
+			log.Debug(fmt.Sprintf("Mux client %x is closed", info.id))
 			continue
 		}
 		if info.client.NumStreams() < c.concurrency || c.concurrency <= 0 {

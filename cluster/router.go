@@ -265,7 +265,9 @@ func (cr *ClusterRouter) DialConn(addr *tunnel.Address) (net.Conn, string, error
 		return nil, "local", nil
 	}
 
-	log.InfoKV("cluster: relay decision",
+	// Routine per-connection decision: Debug; relay metrics and the
+	// WarnKV failure path below cover the observable signals (issue #3).
+	log.DebugKV("cluster: relay decision",
 		"target", addr.String(),
 		"peer", bestPeer,
 		"gain_ms", gain.Milliseconds())
@@ -317,7 +319,7 @@ func (cr *ClusterRouter) dialForceRelay(addr *tunnel.Address) (net.Conn, string,
 		return nil, "local", nil
 	}
 
-	log.InfoKV("cluster: force-relay",
+	log.DebugKV("cluster: force-relay",
 		"target", addr.String(),
 		"peer", selectedPeer)
 

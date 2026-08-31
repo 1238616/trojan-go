@@ -27,21 +27,36 @@ func formatKV(msg string, kvs []interface{}) string {
 }
 
 // DebugKV logs a debug message with structured key-value pairs.
+// The level check happens BEFORE formatKV so a filtered message costs
+// neither the strings.Builder growth nor the per-pair fmt.Sprint calls
+// (issue #3).
 func DebugKV(msg string, kvs ...interface{}) {
+	if !LevelEnabled(AllLevel) {
+		return
+	}
 	Debug(formatKV(msg, kvs))
 }
 
 // InfoKV logs an info message with structured key-value pairs.
 func InfoKV(msg string, kvs ...interface{}) {
+	if !LevelEnabled(InfoLevel) {
+		return
+	}
 	Info(formatKV(msg, kvs))
 }
 
 // WarnKV logs a warning message with structured key-value pairs.
 func WarnKV(msg string, kvs ...interface{}) {
+	if !LevelEnabled(WarnLevel) {
+		return
+	}
 	Warn(formatKV(msg, kvs))
 }
 
 // ErrorKV logs an error message with structured key-value pairs.
 func ErrorKV(msg string, kvs ...interface{}) {
+	if !LevelEnabled(ErrorLevel) {
+		return
+	}
 	Error(formatKV(msg, kvs))
 }

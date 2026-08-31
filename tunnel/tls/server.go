@@ -146,7 +146,9 @@ func (s *Server) acceptLoop() {
 				return
 			}
 
-			log.Info("tls connection from", conn.RemoteAddr())
+			// Every inbound connection triggers this; Debug keeps the
+			// default level quiet (issue #3).
+			log.Debug("tls connection from", conn.RemoteAddr())
 			state := tlsConn.ConnectionState()
 			log.Trace("tls handshake", tls.CipherSuiteName(state.CipherSuite), state.DidResume, state.NegotiatedProtocol)
 
