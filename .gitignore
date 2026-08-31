@@ -22,3 +22,5 @@ build/
 *.key
 *.dat
 trojan-go
+# Cross-compiled release artifacts (issue #14): trojan-go-linux-amd64 etc.
+/trojan-go-*

@@ -4,7 +4,7 @@
 
 Trojan-Go 支持[多路复用](#多路复用)提升并发性能；使用[路由模块](#路由模块)实现国内外分流；支持 [CDN 流量中转](#Websocket)(基于 WebSocket over TLS)；支持使用 AEAD 对 Trojan 流量进行[二次加密](#aead-加密)(基于 Shadowsocks AEAD)；支持可插拔的[传输层插件](#传输层插件)，允许替换 TLS，使用其他加密隧道传输 Trojan 协议流量。
 
-预编译二进制可执行文件可在 [Release 页面](https://github.com/p4gefau1t/trojan-go/releases)下载。解压后即可直接运行，无其他组件依赖。
+预编译二进制可执行文件可在 [Release 页面](https://github.com/1238616/trojan-go/releases)下载。解压后即可直接运行，无其他组件依赖。
 
 如遇到配置和使用问题、发现 bug，或是有更好的想法，欢迎加入 [Telegram 交流反馈群](https://t.me/trojan_go_chat)。
 
@@ -76,13 +76,23 @@ Trojan-Go 服务端兼容所有原 Trojan 客户端，如 Igniter、ShadowRocket
 
 4. 使用 Docker 部署
 
+    上游镜像 `p4gefau1t/trojan-go` **不包含本 fork 的任何改动**（cluster、singmux、muxcool、监控仪表盘等），请先从本仓库源码构建镜像：
+
+    ```shell
+    git clone https://github.com/1238616/trojan-go.git
+    cd trojan-go
+    docker build -t trojan-go .
+    ```
+
+    然后运行（配置文件挂载到 `/etc/trojan-go/config.json`）：
+
     ```shell
     docker run \
         --name trojan-go \
         -d \
         -v /etc/trojan-go/:/etc/trojan-go \
         --network host \
-        p4gefau1t/trojan-go
+        trojan-go
     ```
 
    或者
@@ -93,7 +103,7 @@ Trojan-Go 服务端兼容所有原 Trojan 客户端，如 Igniter、ShadowRocket
         -d \
         -v /path/to/host/config:/path/in/container \
         --network host \
-        p4gefau1t/trojan-go \
+        trojan-go \
         /path/in/container/config.json
     ```
 
@@ -873,7 +883,7 @@ make test
 使用 `make` 进行编译：
 
 ```shell
-git clone https://github.com/p4gefau1t/trojan-go.git
+git clone https://github.com/1238616/trojan-go.git
 cd trojan-go
 make
 make install #安装systemd服务等，可选

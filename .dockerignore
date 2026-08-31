@@ -1,0 +1,10 @@
+# Keep the docker build context small (issue #14): local build artifacts
+# and generated files are never needed inside the image.
+trojan-go
+trojan-go-*
+build/
+*.zip
+*.tar.gz
+*.dat
+profile_debug/
+.gitignore
