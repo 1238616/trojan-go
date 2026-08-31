@@ -12,6 +12,7 @@ import (
 type ConnInfo struct {
 	ID            string  `json:"id"`
 	Target        string  `json:"target"`
+	Type          string  `json:"type"` // "tcp" or "udp"
 	UploadBytes   int64   `json:"upload_bytes"`
 	DownloadBytes int64   `json:"download_bytes"`
 	UploadSpeed   float64 `json:"upload_speed"`   // bytes per second
@@ -19,6 +20,23 @@ type ConnInfo struct {
 	StartTime     int64   `json:"start_time"`     // unix timestamp
 	Duration      float64 `json:"duration"`       // seconds
 	Status        string  `json:"status"`         // "active" or "closed"
+}
+
+// EntryKind distinguishes TCP connections from UDP packet flows so the
+// dashboard and the per-second samplers can treat them separately
+// (issue #10).
+type EntryKind int
+
+const (
+	EntryTCP EntryKind = iota
+	EntryUDP
+)
+
+func (k EntryKind) String() string {
+	if k == EntryUDP {
+		return "udp"
+	}
+	return "tcp"
 }
 
 // Summary provides aggregate stats across all active connections.
@@ -45,8 +63,11 @@ type Entry = connEntry
 // All counters are atomic so the data path is lock-free.
 type connEntry struct {
 	id        string
-	target    string
+	targetVal atomic.Value // string; UDP flows learn their target from the first packet
 	startTime time.Time
+
+	// kind is immutable after registration.
+	kind EntryKind
 
 	// status: 0 = active, 1 = closed
 	statusFlag atomic.Int32
@@ -54,11 +75,20 @@ type connEntry struct {
 	uploadBytes   atomic.Int64
 	downloadBytes atomic.Int64
 
+	// packets counts datagrams relayed in both directions (UDP flows
+	// only; TCP flows leave it at zero). Feeds the packet_pps metric.
+	packets atomic.Int64
+
 	// updated by calcLoop only
 	lastUpload    atomic.Int64
 	lastDownload  atomic.Int64
+	lastPackets   atomic.Int64
 	uploadSpeed   atomic.Uint64 // bits of float64
 	downloadSpeed atomic.Uint64
+
+	// targetSet guards SetTargetOnce so concurrent packet directions
+	// don't race over which address labels the flow.
+	targetSet atomic.Bool
 
 	// scheduled deletion timestamp (unix nano), 0 = not scheduled
 	deleteAfter atomic.Int64
@@ -78,6 +108,46 @@ func (e *connEntry) AddDownload(n int64) {
 		return
 	}
 	e.downloadBytes.Add(n)
+}
+
+// AddPacket counts one relayed datagram (UDP flows).
+func (e *connEntry) AddPacket() {
+	if e == nil {
+		return
+	}
+	e.packets.Add(1)
+}
+
+// target returns the flow's current target string.
+func (e *connEntry) target() string {
+	if v := e.targetVal.Load(); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// SetTargetOnce labels the flow with its first observed target (UDP
+// flows register before the first packet reveals the destination).
+// Only the first call wins.
+func (e *connEntry) SetTargetOnce(s string) {
+	if e == nil || s == "" {
+		return
+	}
+	if e.targetSet.CompareAndSwap(false, true) {
+		e.targetVal.Store(s)
+	}
+}
+
+// TargetKnown reports whether the flow already carries a target label.
+// Hot paths check this before paying for Address.String() on every
+// packet; a nil entry reports true so SetTargetOnce attempts are skipped.
+func (e *connEntry) TargetKnown() bool {
+	if e == nil {
+		return true
+	}
+	return e.targetSet.Load()
 }
 
 func (e *connEntry) statusString() string {
@@ -128,11 +198,23 @@ func NewMonitor() *Monitor {
 // Hot paths should hold this pointer and call AddUpload / AddDownload directly,
 // avoiding the map lookup performed by RecordUpload / RecordDownload.
 func (m *Monitor) RegisterEntry(id, target string) *connEntry {
+	return m.registerEntry(id, target, EntryTCP)
+}
+
+// RegisterPacketEntry adds a new UDP packet flow. The target may be
+// unknown at registration time (it is learned from the first packet
+// via SetTargetOnce); pass a placeholder such as "udp".
+func (m *Monitor) RegisterPacketEntry(id, target string) *connEntry {
+	return m.registerEntry(id, target, EntryUDP)
+}
+
+func (m *Monitor) registerEntry(id, target string, kind EntryKind) *connEntry {
 	e := &connEntry{
 		id:        id,
-		target:    target,
 		startTime: time.Now(),
+		kind:      kind,
 	}
+	e.targetVal.Store(target)
 	m.connections.Store(id, e)
 	m.totalCount.Add(1)
 	m.activeCount.Add(1)
@@ -199,7 +281,8 @@ func (m *Monitor) GetAll() []ConnInfo {
 		e := v.(*connEntry)
 		result = append(result, ConnInfo{
 			ID:            e.id,
-			Target:        e.target,
+			Target:        e.target(),
+			Type:          e.kind.String(),
 			UploadBytes:   e.uploadBytes.Load(),
 			DownloadBytes: e.downloadBytes.Load(),
 			UploadSpeed:   loadFloat64(&e.uploadSpeed),
@@ -271,6 +354,9 @@ func (m *Monitor) calcLoop() {
 			// Per-second per-connection samples fed into the metrics
 			// reservoirs for P50/P95 throughput estimation.
 			var upSamples, downSamples []float64
+			// Per-second per-UDP-flow samples (packets and bytes) fed
+			// into the packet_pps / packet_bps reservoirs (issue #10).
+			var pktPps, pktBps []float64
 
 			m.connections.Range(func(k, v interface{}) bool {
 				e := v.(*connEntry)
@@ -292,21 +378,33 @@ func (m *Monitor) calcLoop() {
 				totalUp += up
 				totalDown += down
 				activeCount++
-				upSamples = append(upSamples, up)
-				downSamples = append(downSamples, down)
+				if e.kind == EntryUDP {
+					curPkts := e.packets.Load()
+					lastPkts := e.lastPackets.Swap(curPkts)
+					pktPps = append(pktPps, float64(curPkts-lastPkts))
+					pktBps = append(pktBps, up+down)
+				} else {
+					upSamples = append(upSamples, up)
+					downSamples = append(downSamples, down)
+				}
 				return true
 			})
 
 			// Feed metrics collector (no-op when nobody asked for it yet).
-			if globalMetrics != nil {
-				globalMetrics.observePerSecond(upSamples, downSamples)
+			// The pointer is loaded atomically: GlobalMetrics() may still
+			// be initialising it concurrently on first use (issue #10).
+			if gm := globalMetricsPtr.Load(); gm != nil {
+				gm.observePerSecond(upSamples, downSamples)
+				for i := range pktPps {
+					gm.ObservePacketPerSecond(pktPps[i], pktBps[i])
+				}
 				// Phase 1: sample registered ChannelGauges and bump the
 				// backpressure event counter when any channel is above
 				// the configured threshold.
-				if thresh := globalMetrics.BackpressureThresh(); thresh > 0 {
-					for _, s := range globalMetrics.SnapshotChannels() {
+				if thresh := gm.BackpressureThresh(); thresh > 0 {
+					for _, s := range gm.SnapshotChannels() {
 						if s.Cap > 0 && float64(s.Depth)/float64(s.Cap) >= thresh {
-							globalMetrics.RecordBackpressureEvent()
+							gm.RecordBackpressureEvent()
 						}
 					}
 				}

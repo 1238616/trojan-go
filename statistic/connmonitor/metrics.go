@@ -227,14 +227,17 @@ type Metrics struct {
 }
 
 var (
-	globalMetrics     *Metrics
+	// globalMetrics is stored in an atomic.Pointer because Monitor.calcLoop
+	// reads it every second from a background goroutine while the first
+	// GlobalMetrics() call may still be racing to initialise it (issue #10).
+	globalMetricsPtr  atomic.Pointer[Metrics]
 	globalMetricsOnce sync.Once
 )
 
 // GlobalMetrics returns the singleton metrics collector.
 func GlobalMetrics() *Metrics {
 	globalMetricsOnce.Do(func() {
-		globalMetrics = &Metrics{
+		globalMetricsPtr.Store(&Metrics{
 			upBpsRes:            newReservoir(metricsHistogramSampleCap),
 			downBpsRes:          newReservoir(metricsHistogramSampleCap),
 			tlsHandshakeLatRes:  newReservoir(metricsHistogramSampleCap),
@@ -253,9 +256,9 @@ func GlobalMetrics() *Metrics {
 			userCap:              userCapDefault,
 			muxStreamsPerConnRes: newReservoir(metricsHistogramSampleCap),
 			muxQueueDepthRes:     newReservoir(metricsHistogramSampleCap),
-		}
+		})
 	})
-	return globalMetrics
+	return globalMetricsPtr.Load()
 }
 
 // RecordConnOpen is called when a new relay connection enters the proxy.

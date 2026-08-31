@@ -202,6 +202,7 @@ func (p *Proxy) relayConnLoop() {
 
 func (p *Proxy) relayPacketLoop() {
 	metrics := connmonitor.GlobalMetrics()
+	monitor := connmonitor.Global()
 	for _, source := range p.sources {
 		go func(source tunnel.Server) {
 			for {
@@ -225,6 +226,16 @@ func (p *Proxy) relayPacketLoop() {
 					}
 					defer outbound.Close()
 
+					// Issue #10: register the UDP flow with the connection
+					// monitor so it shows up in /api/connections (with type
+					// "udp"), the summary byte totals, and the traffic
+					// history — exactly like TCP connections do. The real
+					// target is unknown until the first packet reveals it,
+					// so it is learned lazily via SetTargetOnce.
+					connID := strconv.AppendInt([]byte("udp-"), p.connSeq.Add(1), 10)
+					entry := monitor.RegisterPacketEntry(string(connID), "udp")
+					defer monitor.UnregisterEntry(entry)
+
 					// Phase 1: packet-flow lifecycle metrics. The counter
 					// bookkeeping is done once per flow; per-packet
 					// accounting lives inside each goroutine.
@@ -235,33 +246,8 @@ func (p *Proxy) relayPacketLoop() {
 					}()
 
 					errChan := make(chan error, 2)
-					copyPacket := func(a, b tunnel.PacketConn) {
-						// Phase 1: borrow an 8 KiB buffer from the packet
-						// pool instead of per-flow make([]byte, 8192).
-						// ReadWithMetadata is synchronous so there is no
-						// aliasing issue.
-						bp := getPacketBuf()
-						defer putPacketBuf(bp)
-						buf := *bp
-						for {
-							n, metadata, err := a.ReadWithMetadata(buf)
-							if err != nil {
-								errChan <- err
-								return
-							}
-							if n == 0 {
-								errChan <- nil
-								return
-							}
-							_, err = b.WriteWithMetadata(buf[:n], metadata)
-							if err != nil {
-								errChan <- err
-								return
-							}
-						}
-					}
-					go copyPacket(inbound, outbound)
-					go copyPacket(outbound, inbound)
+					go relayPacketDir(inbound, outbound, entry, true, errChan)
+					go relayPacketDir(outbound, inbound, entry, false, errChan)
 					select {
 					case err = <-errChan:
 						if err != nil && !errors.Is(err, io.EOF) && !strings.Contains(err.Error(), "EOF") {
@@ -275,6 +261,52 @@ func (p *Proxy) relayPacketLoop() {
 				}(inbound)
 			}
 		}(source)
+	}
+}
+
+// relayPacketDir copies datagrams in one direction between two packet
+// connections and accounts bytes and packet counts on the flow's monitor
+// entry (issue #10), feeding the packet_pps / packet_bps samplers.
+//
+// Zero-length datagrams (DNS keepalives, QUIC / game heartbeat probes)
+// are legal UDP payloads: they are forwarded like any other packet and
+// must NOT terminate the flow. The direction only ends when Read or
+// Write returns an error.
+func relayPacketDir(a, b tunnel.PacketConn, entry *connmonitor.Entry, upload bool, errChan chan<- error) {
+	// Phase 1: borrow an 8 KiB buffer from the packet
+	// pool instead of per-flow make([]byte, 8192).
+	// ReadWithMetadata is synchronous so there is no
+	// aliasing issue.
+	bp := getPacketBuf()
+	defer putPacketBuf(bp)
+	buf := *bp
+	for {
+		n, metadata, err := a.ReadWithMetadata(buf)
+		if err != nil {
+			errChan <- err
+			return
+		}
+		if upload {
+			entry.AddUpload(int64(n))
+			// Learn the flow's target from the first packet's metadata.
+			// TargetKnown() avoids the Address.String() allocation on the
+			// 2nd..Nth packet.
+			if !entry.TargetKnown() && metadata != nil && metadata.Address != nil {
+				entry.SetTargetOnce(metadata.Address.String())
+			}
+		} else {
+			entry.AddDownload(int64(n))
+		}
+		entry.AddPacket()
+		if metadata == nil {
+			// A datagram without a destination address cannot be routed;
+			// count it but drop it instead of crashing the flow.
+			continue
+		}
+		if _, err = b.WriteWithMetadata(buf[:n], metadata); err != nil {
+			errChan <- err
+			return
+		}
 	}
 }
 

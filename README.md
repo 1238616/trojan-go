@@ -341,7 +341,7 @@ conn-monitor:
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/connections` | 获取所有连接的实时信息（速率、字节、时长、状态） |
+| GET | `/api/connections` | 获取所有 TCP 连接与 UDP 流的实时信息（类型、速率、字节、时长、状态） |
 | GET | `/api/summary` | 获取聚合统计（活跃连接数、总速率、总流量） |
 | GET | `/api/history` | 获取最近 15 分钟的流量历史数据点（900 点） |
 | GET | `/api/metrics` | 获取高级指标快照（连接生命周期、吞吐量百分位、TLS 握手、通道水位、Go 运行时等） |
@@ -400,6 +400,7 @@ curl -H "Authorization: Bearer my-dashboard-secret" http://127.0.0.1:9090/api/co
   {
     "id": "conn-1",
     "target": "google.com:443",
+    "type": "tcp",
     "upload_bytes": 4096,
     "download_bytes": 65536,
     "upload_speed": 1024.0,
@@ -407,9 +408,23 @@ curl -H "Authorization: Bearer my-dashboard-secret" http://127.0.0.1:9090/api/co
     "start_time": 1714276800,
     "duration": 30.5,
     "status": "active"
+  },
+  {
+    "id": "udp-3",
+    "target": "8.8.8.8:53",
+    "type": "udp",
+    "upload_bytes": 512,
+    "download_bytes": 2048,
+    "upload_speed": 64.0,
+    "download_speed": 256.0,
+    "start_time": 1714276812,
+    "duration": 18.2,
+    "status": "active"
   }
 ]
 ```
+
+> **UDP 流：** `type` 字段区分 `tcp` 连接与 `udp` 数据包流。UDP 流的字节数同样计入 `/api/summary` 的累计流量与 `/api/history` 的历史曲线；其 `target` 在首个数据包到达后从包元数据学习得到（注册时短暂显示为 `udp` 占位）。零长度数据报（DNS 保活、QUIC/游戏探测）会被正常转发，不会中断流。
 
 #### Prometheus 抓取
 
@@ -443,7 +458,7 @@ scrape_configs:
 | 多路复用 | `trojan_mux_streams_active`, `trojan_mux_streams_per_conn_p95` | 活跃 mux 流数、每物理连接流数百分位、队列深度 |
 | 按用户 | `trojan_user_bytes_down_total{hash="abc"}` | 每用户连接数、认证失败、上下行字节（按 `hash` 标签区分） |
 | 按目标 | `trojan_target_dials_total{host="google.com"}` | 每目标拨号次数、失败、上下行字节、延迟百分位 |
-| 数据包流 | `trojan_packet_open_total`, `trojan_packet_pps_p50` | UDP 数据包流开/关、PPS/BPS 百分位 |
+| 数据包流 | `trojan_packet_open_total`, `trojan_packet_pps_p50` | UDP 数据包流开/关；PPS/BPS 百分位按每秒每流采样（数据源为 connmonitor 中被中继的 UDP 流） |
 | DNS | `trojan_dns_resolve_total`, `trojan_dns_resolve_p95_ms` | DNS 解析次数、失败数、延迟百分位 |
 | 反压 | `trojan_backpressure_events_total` | 内部通道水位超阈值的反压事件计数 |
 | Go 运行时 | `trojan_go_goroutines`, `trojan_go_heap_alloc_mb`, `trojan_go_gc_pause_last_ms` | goroutine 数、堆内存、GC 暂停 |
