@@ -11,8 +11,13 @@ type PeerWebsocketConfig struct {
 }
 
 type PeerSSLConfig struct {
-	SNI    string `json:"sni" yaml:"sni"`
-	Verify bool   `json:"verify" yaml:"verify"`
+	SNI string `json:"sni" yaml:"sni"`
+	// Verify controls peer certificate verification. It is a pointer so the
+	// ABSENT case can be told from an explicit false: absent means verify
+	// ENABLED (the safe default, issue #12); only "verify": false disables
+	// it. Flipping this default is a deliberate breaking change — configs
+	// that relied on the old insecure default must now opt out explicitly.
+	Verify *bool `json:"verify" yaml:"verify"`
 }
 
 // PeerMuxConfig enables connection multiplexing toward a peer: one

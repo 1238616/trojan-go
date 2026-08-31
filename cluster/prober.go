@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,10 +17,68 @@ import (
 type ProbeTarget struct {
 	Host string
 	Port int
+	// CIDR holds the normalized CIDR string when this target represents a
+	// static cidr: rule. Host then carries a representative address inside
+	// the block that is dialed for the measurement, while route-table
+	// entries are keyed by the CIDR itself so lookups for any IP inside
+	// the block can use it (issue #5).
+	CIDR string
 }
 
 func (pt ProbeTarget) Key() string {
+	if pt.CIDR != "" {
+		return pt.CIDR
+	}
 	return net.JoinHostPort(pt.Host, strconv.Itoa(pt.Port))
+}
+
+// cidrRepresentative returns the address probed on behalf of a CIDR target:
+// the first host address in the block (network address + 1), or the network
+// address itself when the block is a single host (/32, /128). Probing one
+// representative is only an approximation of the whole block's latency, but
+// it is what turns a CIDR rule from "matched but never measured" into an
+// entry the route table can actually answer with.
+func cidrRepresentative(ipnet *net.IPNet) net.IP {
+	ip := ipnet.IP
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	ones, bits := ipnet.Mask.Size()
+	rep := make(net.IP, len(ip))
+	copy(rep, ip)
+	if ones >= bits {
+		return rep
+	}
+	for i := len(rep) - 1; i >= 0; i-- {
+		rep[i]++
+		if rep[i] != 0 {
+			break
+		}
+	}
+	return rep
+}
+
+// targetRuleTypes are the recognized "type:value" prefixes in cluster
+// target lists. Anything else is treated as a bare "host[:port]" target.
+var targetRuleTypes = map[string]bool{
+	"cidr":    true,
+	"domain":  true,
+	"ip":      true,
+	"geoip":   true,
+	"geosite": true,
+}
+
+// splitTargetRule splits a configured target into (ruleType, value);
+// ruleType is "" for unprefixed "host[:port]" targets.
+func splitTargetRule(t string) (ruleType, value string) {
+	parts := strings.SplitN(t, ":", 2)
+	if len(parts) == 2 {
+		prefix := strings.ToLower(strings.TrimSpace(parts[0]))
+		if targetRuleTypes[prefix] {
+			return prefix, strings.TrimSpace(parts[1])
+		}
+	}
+	return "", t
 }
 
 // DynamicTarget is registered by actual traffic when dial RTT exceeds
@@ -89,23 +148,54 @@ func NewProber(ctx context.Context, cfg *Config, routeTable *RouteTable, peerDia
 
 	latencyThreshold := time.Duration(cfg.LatencyThreshold) * time.Millisecond
 
-	// Parse static targets from config
+	// Parse static targets from config. All rule shapes the matcher
+	// understands must also become probe targets here, otherwise the
+	// matcher lets a connection through to the route table but the table
+	// never holds any measurement for it (issue #5).
 	var staticTargets []ProbeTarget
 	for _, t := range cfg.Targets {
-		// Static targets use port 443 by default for probing
-		host, portStr, err := net.SplitHostPort(t)
-		if err != nil {
-			// No port specified, try parsing as CIDR or bare IP
-			// For CIDR targets, we can't probe directly - skip
-			// For domain/IP targets, use port 443
-			if ip := net.ParseIP(t); ip != nil {
-				staticTargets = append(staticTargets, ProbeTarget{Host: t, Port: 443})
+		ruleType, value := splitTargetRule(t)
+		switch ruleType {
+		case "cidr":
+			_, ipnet, err := net.ParseCIDR(value)
+			if err != nil {
+				log.Warnf("cluster: invalid cidr target %q, ignored", t)
+				continue
 			}
-			continue
-		}
-		port, _ := strconv.Atoi(portStr)
-		if port > 0 {
-			staticTargets = append(staticTargets, ProbeTarget{Host: host, Port: port})
+			// Probe a representative address of the block; the result is
+			// published under the CIDR key (see ProbeTarget.Key).
+			staticTargets = append(staticTargets, ProbeTarget{
+				Host: cidrRepresentative(ipnet).String(),
+				Port: 443,
+				CIDR: ipnet.String(),
+			})
+		case "ip":
+			if net.ParseIP(value) == nil {
+				log.Warnf("cluster: invalid ip target %q, ignored", t)
+				continue
+			}
+			staticTargets = append(staticTargets, ProbeTarget{Host: value, Port: 443})
+		case "domain":
+			staticTargets = append(staticTargets, ProbeTarget{Host: value, Port: 443})
+		case "geoip", "geosite":
+			log.Warnf("cluster: %s target %q is not supported for probing, ignored", ruleType, t)
+		case "":
+			// Unprefixed "host:port" or bare IP.
+			host, portStr, err := net.SplitHostPort(value)
+			if err != nil {
+				if ip := net.ParseIP(value); ip != nil {
+					staticTargets = append(staticTargets, ProbeTarget{Host: value, Port: 443})
+				} else {
+					log.Warnf("cluster: invalid target %q, ignored", t)
+				}
+				continue
+			}
+			port, _ := strconv.Atoi(portStr)
+			if port > 0 {
+				staticTargets = append(staticTargets, ProbeTarget{Host: host, Port: port})
+			}
+		default:
+			log.Warnf("cluster: unknown target rule type %q, ignored", ruleType)
 		}
 	}
 

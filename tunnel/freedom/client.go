@@ -28,7 +28,12 @@ var defaultResolver = &net.Resolver{PreferGo: true}
 // the resolved IPs, reporting each phase separately to the metrics
 // collector. The original combined OriginDial counter is still bumped
 // for dashboard backward compatibility.
-func dialSplit(ctx context.Context, network, addr string, d *net.Dialer, metrics *connmonitor.Metrics) (net.Conn, error) {
+//
+// resolvedIP, when non-nil, is an address an upstream layer (e.g. the
+// cluster router) already resolved for this same connection; the DNS phase
+// is skipped entirely so a single connection triggers at most one resolver
+// round-trip across all layers (issue #4).
+func dialSplit(ctx context.Context, network, addr string, resolvedIP net.IP, d *net.Dialer, metrics *connmonitor.Metrics) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
@@ -51,23 +56,31 @@ func dialSplit(ctx context.Context, network, addr string, d *net.Dialer, metrics
 		return conn, derr
 	}
 
-	// Phase 1: DNS resolve
-	dnsStart := time.Now()
-	ips, rerr := defaultResolver.LookupIPAddr(ctx, host)
-	dnsDur := time.Since(dnsStart)
-	metrics.RecordDNSResolve(dnsDur, rerr == nil && len(ips) > 0, host)
-	if rerr != nil {
-		if tgt != nil {
-			tgt.RecordDial(dnsDur, false)
+	var ips []net.IPAddr
+	var dnsDur time.Duration
+	if resolvedIP != nil {
+		// Reuse the upstream resolution instead of querying again.
+		ips = []net.IPAddr{{IP: resolvedIP}}
+	} else {
+		// Phase 1: DNS resolve
+		dnsStart := time.Now()
+		var rerr error
+		ips, rerr = defaultResolver.LookupIPAddr(ctx, host)
+		dnsDur = time.Since(dnsStart)
+		metrics.RecordDNSResolve(dnsDur, rerr == nil && len(ips) > 0, host)
+		if rerr != nil {
+			if tgt != nil {
+				tgt.RecordDial(dnsDur, false)
+			}
+			return nil, rerr
 		}
-		return nil, rerr
-	}
-	if len(ips) == 0 {
-		dnsErr := &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
-		if tgt != nil {
-			tgt.RecordDial(dnsDur, false)
+		if len(ips) == 0 {
+			dnsErr := &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+			if tgt != nil {
+				tgt.RecordDial(dnsDur, false)
+			}
+			return nil, dnsErr
 		}
-		return nil, dnsErr
 	}
 
 	// Filter by network: "tcp4" -> IPv4 only, "tcp6" -> IPv6 only.
@@ -197,7 +210,14 @@ func (c *Client) DialConn(addr *tunnel.Address, _ tunnel.Tunnel) (tunnel.Conn, e
 	}
 	dialStart := time.Now()
 	metrics := connmonitor.GlobalMetrics()
-	tcpConn, err := dialSplit(c.ctx, network, addr.String(), dialer, metrics)
+	// When an upstream layer already resolved this domain for the current
+	// connection (cluster router decision path), hand the result over so
+	// the dial doesn't spend a second resolver round-trip on it (issue #4).
+	var resolvedIP net.IP
+	if addr.AddressType == tunnel.DomainName && addr.IP != nil {
+		resolvedIP = addr.IP
+	}
+	tcpConn, err := dialSplit(c.ctx, network, addr.String(), resolvedIP, dialer, metrics)
 	dialDur := time.Since(dialStart)
 	connmonitor.GlobalMetrics().RecordOriginDial(dialDur, classifyDialError(err))
 	if err != nil {

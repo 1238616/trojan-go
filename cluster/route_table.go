@@ -1,10 +1,10 @@
 package cluster
 
 import (
-	"math"
 	"net"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,19 +28,54 @@ type PeerLatency struct {
 
 // RouteTable maintains target → sorted peer latency mappings.
 // Updated by Prober, queried by ClusterRouter.
+//
+// Entry keys come in two shapes, both written by the prober and both
+// understood by match():
+//   - "host:port" — exact probe targets and dynamically registered targets
+//   - "<cidr>" (e.g. "149.154.160.0/20") — static CIDR targets, probed via
+//     a representative address; matched by IP containment (issue #5)
 type RouteTable struct {
 	mu             sync.RWMutex
-	entries        map[string][]PeerLatency // key: "host:port"
+	entries        map[string][]PeerLatency // key: "host:port" or "<cidr>"
 	localName      string
 	relayThreshold time.Duration
+
+	// cidrNets mirrors the CIDR-shaped keys of entries so match() can test
+	// IP containment without re-parsing every key on every lookup.
+	cidrNets map[string]*net.IPNet
+
+	// peerWeights breaks RTT ties in BestExit / FastestPeer: when two peers
+	// measure the same latency, the one with the higher configured weight
+	// wins (issue #12; "weight: 0" keeps pure RTT ordering).
+	peerWeights map[string]int
 }
 
 func NewRouteTable(localName string, relayThresholdMs int) *RouteTable {
 	return &RouteTable{
 		entries:        make(map[string][]PeerLatency),
+		cidrNets:       make(map[string]*net.IPNet),
 		localName:      localName,
 		relayThreshold: time.Duration(relayThresholdMs) * time.Millisecond,
 	}
+}
+
+// SetPeerWeights installs the per-peer weights used as RTT tie-breakers.
+func (rt *RouteTable) SetPeerWeights(weights map[string]int) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.peerWeights = weights
+}
+
+// isCIDRKey reports whether key parses as a CIDR block and returns it.
+func isCIDRKey(key string) (*net.IPNet, bool) {
+	if !strings.Contains(key, "/") {
+		return nil, false
+	}
+	_, ipnet, err := net.ParseCIDR(key)
+	if err != nil {
+		return nil, false
+	}
+	return ipnet, true
 }
 
 // Update records a probe result for a peer→target pair.
@@ -48,6 +83,14 @@ func NewRouteTable(localName string, relayThresholdMs int) *RouteTable {
 func (rt *RouteTable) Update(targetKey string, peerName string, rtt time.Duration) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+
+	// Track CIDR-shaped keys for the containment fallback in match().
+	// Normalize the key (e.g. "149.154.165.5/20" -> "149.154.160.0/20")
+	// so entries and cidrNets always agree on the spelling.
+	if ipnet, ok := isCIDRKey(targetKey); ok {
+		targetKey = ipnet.String()
+		rt.cidrNets[targetKey] = ipnet
+	}
 
 	peers := rt.entries[targetKey]
 	found := false
@@ -109,7 +152,6 @@ func (rt *RouteTable) BestExit(targetHost string, targetPort int) (peerName stri
 	localFound := false
 	localAvailable := false
 	var bestPeer PeerLatency
-	bestPeer.RTT = time.Duration(math.MaxInt64)
 
 	now := time.Now()
 	for _, p := range peers {
@@ -122,7 +164,7 @@ func (rt *RouteTable) BestExit(targetHost string, targetPort int) (peerName stri
 			localRTT = p.RTT
 			continue
 		}
-		if p.Available && p.RTT < bestPeer.RTT {
+		if p.Available && rt.better(p, bestPeer) {
 			bestPeer = p
 		}
 	}
@@ -159,7 +201,6 @@ func (rt *RouteTable) FastestPeer(targetHost string, targetPort int) string {
 	peers := rt.match(targetHost, targetPort)
 	now := time.Now()
 	var best PeerLatency
-	best.RTT = time.Duration(math.MaxInt64)
 
 	for _, p := range peers {
 		if now.Sub(p.UpdatedAt) > staleThreshold {
@@ -168,19 +209,45 @@ func (rt *RouteTable) FastestPeer(targetHost string, targetPort int) string {
 		if p.PeerName == rt.localName {
 			continue
 		}
-		if p.Available && p.RTT < best.RTT {
+		if p.Available && rt.better(p, best) {
 			best = p
 		}
 	}
 	return best.PeerName
 }
 
-// match finds entries for a target. Tries an exact "host:port" match first;
-// if none exists, it falls back to a host-only match that aggregates the
-// entries recorded for the same host on other ports.
+// better reports whether p is a better exit choice than best: lower RTT
+// wins; on exact RTT ties the higher configured peer weight wins
+// (issue #12, weight: 0 keeps pure RTT ordering).
+func (rt *RouteTable) better(p, best PeerLatency) bool {
+	if best.PeerName == "" {
+		return true
+	}
+	if p.RTT != best.RTT {
+		return p.RTT < best.RTT
+	}
+	return rt.weight(p.PeerName) > rt.weight(best.PeerName)
+}
+
+func (rt *RouteTable) weight(name string) int {
+	if rt.peerWeights == nil {
+		return 0
+	}
+	return rt.peerWeights[name]
+}
+
+// match finds entries for a target. Lookup order:
+//  1. Exact "host:port" match — the write key used by the prober and by
+//     dynamic target registration, so same-spell lookups hit directly.
+//  2. Host-only fallback aggregating entries recorded for the same host on
+//     other ports (deterministic: sorted keys, merge by recency).
+//  3. CIDR containment fallback: when the looked-up host is an IP and a
+//     CIDR-keyed entry covers it (issue #5). Static cidr: targets are
+//     probed via a representative address and stored under the CIDR key,
+//     so traffic to any IP inside the block can use the measurements.
 //
-// Both paths are deterministic: the fallback walks keys in sorted order and
-// merges per-peer records by recency, so the result never depends on Go map
+// All paths are deterministic: fallbacks walk keys in sorted order and merge
+// per-peer records by recency, so the result never depends on Go map
 // iteration order (which is randomized per process).
 func (rt *RouteTable) match(targetHost string, targetPort int) []PeerLatency {
 	// Exact "host:port" match.
@@ -200,11 +267,41 @@ func (rt *RouteTable) match(targetHost string, targetPort int) []PeerLatency {
 			keys = append(keys, key)
 		}
 	}
-	if len(keys) == 0 {
-		return nil
+	if len(keys) > 0 {
+		sort.Strings(keys)
+		return rt.mergeKeys(keys)
 	}
-	sort.Strings(keys)
 
+	// CIDR containment fallback: the lookup host must be an IP and some
+	// CIDR-keyed entry must contain it. When several CIDRs cover the IP,
+	// the most specific one (largest prefix) wins; equal prefix lengths
+	// break toward the lexicographically smaller key so the choice is
+	// reproducible.
+	if ip := net.ParseIP(targetHost); ip != nil && len(rt.cidrNets) > 0 {
+		var bestKey string
+		var bestOnes int
+		for key, ipnet := range rt.cidrNets {
+			if !ipnet.Contains(ip) {
+				continue
+			}
+			ones, _ := ipnet.Mask.Size()
+			if bestKey == "" || ones > bestOnes || (ones == bestOnes && key < bestKey) {
+				bestKey = key
+				bestOnes = ones
+			}
+		}
+		if bestKey != "" {
+			if peers, ok := rt.entries[bestKey]; ok && len(peers) > 0 {
+				return peers
+			}
+		}
+	}
+	return nil
+}
+
+// mergeKeys merges the route-table entries of the given keys into one
+// per-peer list, most recently updated record winning per peer.
+func (rt *RouteTable) mergeKeys(keys []string) []PeerLatency {
 	// Merge per peer: the most recently updated record wins. Probes for
 	// different ports of the same host may disagree; the freshest
 	// measurement is the best signal, and picking by UpdatedAt keeps the
@@ -244,6 +341,7 @@ func (rt *RouteTable) Prune() int {
 		}
 		if allStale {
 			delete(rt.entries, key)
+			delete(rt.cidrNets, key)
 			pruned++
 		}
 	}

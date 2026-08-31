@@ -84,6 +84,18 @@ func NewClusterRouter(ctx context.Context, cfg *Config) (*ClusterRouter, error) 
 	matcher := NewTargetMatcher(cfg.Targets)
 	routeTable := NewRouteTable(cfg.NodeName, cfg.RelayThreshold)
 
+	// Wire peer weights into route selection: they break exact RTT ties
+	// in BestExit / FastestPeer (issue #12).
+	weights := make(map[string]int, len(cfg.Peers))
+	for _, peer := range cfg.Peers {
+		if peer.Weight != 0 {
+			weights[peer.Name] = peer.Weight
+		}
+	}
+	if len(weights) > 0 {
+		routeTable.SetPeerWeights(weights)
+	}
+
 	// Create peer dialers
 	peerDialers := make(map[string]*PeerDialer, len(cfg.Peers))
 	for _, peer := range cfg.Peers {
@@ -151,8 +163,14 @@ func (cr *ClusterRouter) Stop() {
 func lookupHosts(addr *tunnel.Address) []string {
 	if addr.DomainName != "" {
 		hosts := []string{addr.DomainName}
-		if ip := resolveTargetIP(addr.DomainName); ip != "" {
-			hosts = append(hosts, ip)
+		ip := addr.IP
+		if ip == nil {
+			if s := resolveTargetIP(addr.DomainName); s != "" {
+				ip = net.ParseIP(s)
+			}
+		}
+		if ip != nil {
+			hosts = append(hosts, ip.String())
 		}
 		return hosts
 	}
@@ -196,6 +214,19 @@ func (cr *ClusterRouter) DialConn(addr *tunnel.Address) (net.Conn, string, error
 	// skipping matcher and local RTT comparison entirely.
 	if cr.cfg != nil && cr.cfg.ForceRelay {
 		return cr.dialForceRelay(addr)
+	}
+
+	// Resolve a domain target once, before any decision layer runs, and
+	// write the result back onto the address (issue #4). Everything
+	// downstream — matcher, route-table lookup, emergency fallback and the
+	// local freedom dial — reuses this resolution instead of re-resolving:
+	// the shared 30s cache plus this write-back keep the per-connection
+	// resolver cost at most one lookup, and the trojan header still carries
+	// the original domain because AddressType is left untouched.
+	if addr.AddressType == tunnel.DomainName && addr.IP == nil && addr.DomainName != "" {
+		if ipStr := resolveTargetIP(addr.DomainName); ipStr != "" {
+			addr.IP = net.ParseIP(ipStr)
+		}
 	}
 
 	// Check if target is in cluster-managed range.
@@ -260,11 +291,21 @@ func (cr *ClusterRouter) dialForceRelay(addr *tunnel.Address) (net.Conn, string,
 	// Try route-table lookup for best peer with probe data
 	selectedPeer = cr.fastestPeerForAddr(addr)
 
-	// No probe data for this target — pick first available peer
+	// No probe data for this target — pick deterministically: highest
+	// configured weight first, then lexicographic name, instead of random
+	// map iteration order.
 	if selectedPeer == "" {
+		names := make([]string, 0, len(cr.peerDialers))
 		for name := range cr.peerDialers {
-			selectedPeer = name
-			break
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		bestWeight := -1
+		for _, name := range names {
+			if w := cr.routeTable.weight(name); w > bestWeight {
+				selectedPeer = name
+				bestWeight = w
+			}
 		}
 	}
 	if selectedPeer == "" {

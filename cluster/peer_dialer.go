@@ -89,6 +89,17 @@ func NewPeerDialer(ctx context.Context, peer PeerConfig) (*PeerDialer, error) {
 		sni = peer.Host
 	}
 
+	// Certificate verification is ON unless the operator explicitly sets
+	// "verify": false (issue #12). The old bool zero-value silently skipped
+	// verification for every config that did not copy the README example.
+	verify := true
+	if peer.SSL.Verify != nil {
+		verify = *peer.SSL.Verify
+	}
+	if !verify {
+		log.Warnf("cluster: peer %s has TLS certificate verification DISABLED; relay traffic is exposed to MITM", peer.Name)
+	}
+
 	concurrency := peer.Mux.Concurrency
 	if concurrency <= 0 {
 		concurrency = muxDefaultConcurrency
@@ -99,7 +110,7 @@ func NewPeerDialer(ctx context.Context, peer PeerConfig) (*PeerDialer, error) {
 		host:           peer.Host,
 		port:           peer.Port,
 		sni:            sni,
-		verify:         peer.SSL.Verify,
+		verify:         verify,
 		wsHost:         peer.Websocket.Host,
 		wsPath:         peer.Websocket.Path,
 		wsEnable:       peer.Websocket.Enabled,

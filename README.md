@@ -610,7 +610,7 @@ cluster:
 | `probe_timeout` | int | `3000` | 探测超时（毫秒） |
 | `relay_threshold` | int | `50` | 中继阈值（毫秒），peer 延迟比本地低超过此值才中继 |
 | `latency_threshold` | int | `100` | 延迟触发阈值（毫秒），origin dial RTT 超过此值的目标才纳入探测 |
-| `targets` | []string | `[]` | 目标匹配规则，支持 `cidr:`, `domain:`, `ip:` |
+| `targets` | []string | `[]` | 目标匹配规则，支持 `cidr:`, `domain:`, `ip:`。所有形式都会被探测（`cidr:` 以块内代表地址探测、结果按 CIDR 记录，块内任意 IP 可命中；`domain:` / `ip:` 默认探测 443 端口） |
 | `peers` | []object | `[]` | peer 节点列表 |
 
 **Peer 字段说明：**
@@ -621,12 +621,12 @@ cluster:
 | `host` | string | 节点地址 |
 | `port` | int | 节点端口 |
 | `password` | string | Trojan 认证密码 |
-| `weight` | int | 权重（同延迟下的偏好，0=按 RTT 排序） |
+| `weight` | int | 权重，用于 RTT 平局裁决：两个 peer 测得相同延迟时选权重高者；0=纯按 RTT 排序 |
 | `websocket.enabled` | bool | 是否使用 WebSocket 连接 peer |
 | `websocket.host` | string | WebSocket Host 头 |
 | `websocket.path` | string | WebSocket 路径 |
 | `ssl.sni` | string | TLS SNI（默认使用 host） |
-| `ssl.verify` | bool | 是否验证 peer 的 TLS 证书 |
+| `ssl.verify` | bool | 是否验证 peer 的 TLS 证书，**默认 `true`**；显式 `false` 才关闭（关闭后中继流量暴露于中间人风险，不推荐） |
 | `mux.enabled` | bool | 是否对该 peer 启用隧道多路复用（默认 `false`） |
 | `mux.concurrency` | int | 单条 mux 会话的最大并发 stream 数（默认 `8`） |
 
@@ -642,10 +642,17 @@ cluster:
 
 **可靠性保障**：
 
-- **确定性路由**：路由选择基于精确的 `host:port` 匹配，结果稳定可复现，不随进程重启或 map 遍历顺序抖动。
+- **确定性路由**：路由选择基于精确的 `host:port` 匹配（外加确定性的 host 回退与 CIDR 包含回退），结果稳定可复现，不随进程重启或 map 遍历顺序抖动。
 - **拨号超时保护**：到 peer 的每次拨号（TCP/TLS/WS 握手、协议头写入）均有超时上限，半开的 peer 节点不会挂死探测循环或中继。
 - **紧急回退负缓存**：对「所有 peer 均失败」的目标，短时间（10s）内抑制重复的紧急回退，避免热门宕机目标把每个用户连接放大成 N 次全栈握手。
 - **仅失败才判不可达**：慢但成功的本地拨号不会被误判为「本地不可达」，只有真正失败的拨号才触发切换。
+
+**行为说明**：
+
+> **破坏性变更**：peer TLS 现在默认**校验证书**（`ssl.verify` 缺省即为 `true`）。此前该字段缺省时不校验；使用自签证书且未显式配置的节点互联必须显式设置 `"verify": false`（不推荐），或改用受信任证书。
+
+- **首次访问行为**：对尚未探测过的目标，第一条连接仍需经历一次本地拨号；本地拨号超时（疑似被墙）时立即把本地标记为不可达并触发紧急探测，同一条连接会紧急回退到可用 peer，后续连接直接按路由表中继，无需等待下一个探测周期。「慢拨号」判定阈值与 freedom 层的 `dial_timeout` 联动（配置了 `dial_timeout > 0` 时取其值，否则默认 5s），不再是孤立的硬编码。
+- **DNS 解析开销**：集群决策路径共享一个 30 秒 TTL 的解析缓存，并合并同一域名的并发解析；单条连接全链路最多触发一次 DNS 解析（匹配、查表、本地拨号复用同一结果），解析结果会写回连接地址供下游拨号直接使用。解析失败或超时不会阻塞，决策路径快速降级为本地直连。
 
 启用连接监控后，可通过 `GET /api/cluster` 查看集群路由状态。
 

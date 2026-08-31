@@ -10,6 +10,35 @@ import (
 	"github.com/p4gefau1t/trojan-go/tunnel"
 )
 
+func boolPtr(b bool) *bool { return &b }
+
+// Issue #12: certificate verification must default to ON when the config
+// omits ssl.verify, and only an explicit false may disable it.
+func TestPeerDialerVerifyDefault(t *testing.T) {
+	ctx := context.Background()
+
+	pd, err := NewPeerDialer(ctx, PeerConfig{Name: "p1", Host: "h.example.com", Port: 443, Password: "x"})
+	if err != nil {
+		t.Fatalf("NewPeerDialer failed: %v", err)
+	}
+	defer pd.Close()
+	if !pd.verify {
+		t.Fatal("expected verify=true by default when ssl.verify is absent")
+	}
+
+	pdOff, err := NewPeerDialer(ctx, PeerConfig{
+		Name: "p2", Host: "h.example.com", Port: 443, Password: "x",
+		SSL: PeerSSLConfig{Verify: boolPtr(false)},
+	})
+	if err != nil {
+		t.Fatalf("NewPeerDialer failed: %v", err)
+	}
+	defer pdOff.Close()
+	if pdOff.verify {
+		t.Fatal("expected verify=false when ssl.verify is explicitly false")
+	}
+}
+
 func TestHexSHA224(t *testing.T) {
 	// Known test vector: SHA-224("password")
 	hash := hexSHA224("password")
@@ -131,7 +160,7 @@ func TestPeerDialerCreateWithWebsocket(t *testing.T) {
 		},
 		SSL: PeerSSLConfig{
 			SNI:    "tokyo.example.com",
-			Verify: true,
+			Verify: boolPtr(true),
 		},
 	}
 

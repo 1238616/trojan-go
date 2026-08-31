@@ -93,7 +93,7 @@ func TestConfigParsePeers(t *testing.T) {
 	if peer.SSL.SNI != "tokyo.example.com" {
 		t.Fatalf("expected sni tokyo.example.com, got %q", peer.SSL.SNI)
 	}
-	if !peer.SSL.Verify {
+	if peer.SSL.Verify == nil || !*peer.SSL.Verify {
 		t.Fatal("expected ssl verify=true")
 	}
 }

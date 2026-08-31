@@ -245,23 +245,28 @@ func TestProberStaticTargetParsing(t *testing.T) {
 		ProbeTimeout:  3000,
 		Targets: []string{
 			"149.154.175.53",      // bare IP → port 443
-			"cidr:91.108.0.0/16",  // CIDR → skipped for static probe
-			"domain:telegram.org", // domain → skipped
+			"cidr:91.108.0.0/16",  // CIDR → probed via representative address
+			"domain:telegram.org", // domain → probed on port 443
 		},
 	}
 	rt := NewRouteTable("local", 50)
 	metrics := NewClusterMetrics()
 	p := NewProber(ctx, cfg, rt, make(map[string]*PeerDialer), metrics)
 
-	// Only bare IPs become static probe targets
-	if len(p.staticTargets) != 1 {
-		t.Fatalf("expected 1 static target, got %d: %v", len(p.staticTargets), p.staticTargets)
+	// Every rule shape the matcher accepts must become a probe target
+	// (issue #5): matched-but-unprobed targets leave the route table empty
+	// and silently disable cluster routing.
+	if len(p.staticTargets) != 3 {
+		t.Fatalf("expected 3 static targets, got %d: %v", len(p.staticTargets), p.staticTargets)
 	}
-	if p.staticTargets[0].Host != "149.154.175.53" {
-		t.Fatalf("expected host=149.154.175.53, got %q", p.staticTargets[0].Host)
+	if p.staticTargets[0].Host != "149.154.175.53" || p.staticTargets[0].Port != 443 {
+		t.Fatalf("unexpected bare IP target: %+v", p.staticTargets[0])
 	}
-	if p.staticTargets[0].Port != 443 {
-		t.Fatalf("expected port=443, got %d", p.staticTargets[0].Port)
+	if p.staticTargets[1].Key() != "91.108.0.0/16" || p.staticTargets[1].Host != "91.108.0.1" {
+		t.Fatalf("unexpected CIDR target: %+v", p.staticTargets[1])
+	}
+	if p.staticTargets[2].Key() != "telegram.org:443" {
+		t.Fatalf("unexpected domain target: %+v", p.staticTargets[2])
 	}
 }
 
