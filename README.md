@@ -816,7 +816,7 @@ Mux:      开启
 
 ## 软件更新状态
 
-> 最后检查日期：2026-06-18
+> 最后检查日期：2026-08-31
 
 ### 上游项目状态
 
@@ -830,31 +830,25 @@ Mux:      开启
 
 ### Go 版本要求
 
-- **go.mod 指定版本**：`go 1.19`
-- **本地安装版本**：`go 1.24.0`
-- **当前最新稳定版**：`go 1.25.12`（2026-06）
-- **建议**：使用 Go 1.21+ 以获得更好的性能和安全特性
+- **go.mod 指定版本**：`go 1.25.13`
+- **说明**：依赖升级（#16）后，`golang.org/x/net` 等库要求较新的工具链；`go 1.25.13` 同时包含标准库安全修复（govulncheck 已验证调用图上无其他已知漏洞）。使用更早的 Go 版本构建时，工具链会按需自动下载。
 
 ### 依赖更新概览
 
-当前共有 **65 个模块** 有可用更新。以下为关键依赖的更新情况：
+关键依赖已全部升级并通过完整测试（#16）：
 
-| 依赖包 | 当前版本 | 最新版本 | 说明 |
-|--------|----------|----------|------|
-| `golang.org/x/crypto` | `v0.0.0-20210817` | `v0.53.0` | ⚠️ 安全相关，建议优先更新 |
-| `golang.org/x/net` | `v0.0.0-20210913` | `v0.56.0` | ⚠️ 网络基础库 |
-| `golang.org/x/sys` | `v0.0.0-20210820` | `v0.46.0` | 系统调用更新 |
-| `google.golang.org/grpc` | `v1.40.0` | `v1.81.1` | gRPC 大幅更新 |
-| `google.golang.org/protobuf` | `v1.27.1` | `v1.36.11` | Protocol Buffers 更新 |
-| `github.com/refraction-networking/utls` | `v0.0.0-20210713` | `v1.8.2` | TLS 指纹伪造库 |
-| `github.com/go-sql-driver/mysql` | `v1.6.0` | `v1.10.0` | MySQL 驱动 |
-| `github.com/miekg/dns` | `v1.1.43` | `v1.1.72` | DNS 库 |
-| `github.com/gorilla/websocket` | `v1.4.2` | `v1.5.3` | WebSocket 库 |
-| `github.com/stretchr/testify` | `v1.7.0` | `v1.11.1` | 测试框架 |
-| `github.com/hashicorp/yamux` | `v0.1.2` | `v0.1.2` | 已是最新 |
-| `github.com/xtaci/smux` | `v1.5.15` | — | 无可用更新 |
+| 依赖包 | 当前版本 | 说明 |
+|--------|----------|------|
+| `gopkg.in/yaml.v3` | `v3.0.1` | 修复 CVE-2022-28948（恶意 YAML 触发 panic/DoS），配置解析路径直接受益 |
+| `golang.org/x/net` | `v0.58.0` | 覆盖 http2 / html 历年 CVE |
+| `golang.org/x/crypto` | `v0.55.0` | |
+| `google.golang.org/grpc` | `v1.83.2` | API 服务层 |
+| `google.golang.org/protobuf` | `v1.36.12` | |
+| `github.com/refraction-networking/utls` | `v1.8.2` | TLS 指纹集合更新至当前主流浏览器；本项目使用的 `UClient`/`HelloXxx_Auto` API 兼容，指纹测试通过 |
+| `github.com/go-sql-driver/mysql` | `v1.10.0` | |
+| `github.com/v2fly/v2ray-core/v4` | `v4.42.1` | **暂缓**：修复版（v4.44.0+）引入已废弃的 `inet.af/netaddr` 依赖，后者在 Go ≥ 1.22 运行时启动即 panic，无法兼容；残留漏洞 GO-2022-0550 需要恶意 GeoIP 文件才可触发，风险低 |
 
-> **注意：** 大幅升级依赖（特别是 `grpc`、`protobuf`、`utls` 等）可能引入 API 不兼容，需要逐一测试验证。建议使用 `go get -u` 逐步更新并运行完整测试。
+> **验证**：`govulncheck ./...` 显示调用图上仅剩上述 v2ray-core 暂缓项，其余已知漏洞均已消除。
 
 ### 更新命令参考
 
@@ -878,7 +872,7 @@ make test
 
 ## 构建
 
-> 请确保 Go 版本 >= 1.19（推荐使用 Go 1.21+）
+> 请确保 Go 版本 >= 1.25.13（go.mod 要求；更早的 Go 会在构建时自动下载对应工具链）
 
 使用 `make` 进行编译：
 
