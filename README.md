@@ -392,6 +392,8 @@ curl -H "Authorization: Bearer my-dashboard-secret" http://127.0.0.1:9090/api/co
 }
 ```
 
+> **字段语义：** `total_connections` 为**累计值**——进程启动以来注册过的连接总数，单调递增，不随连接关闭而减少；当前在线连接数请看 `active_connections`。`total_upload_bytes` / `total_download_bytes` 同为进程启动以来的累计流量。
+
 `GET /api/connections` 返回：
 
 ```json

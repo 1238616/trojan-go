@@ -24,6 +24,9 @@ type ConnInfo struct {
 
 // Summary provides aggregate stats across all active connections.
 type Summary struct {
+	// TotalConnections is CUMULATIVE: the number of connections registered
+	// since process start. It never decreases. Use ActiveConnections for the
+	// current count.
 	TotalConnections   int     `json:"total_connections"`
 	ActiveConnections  int     `json:"active_connections"`
 	TotalUploadSpeed   float64 `json:"total_upload_speed"`
@@ -215,7 +218,11 @@ func (m *Monitor) RecordDownload(id string, n int64) {
 // GetAll returns a snapshot of all tracked connections.
 func (m *Monitor) GetAll() []ConnInfo {
 	now := time.Now()
-	result := make([]ConnInfo, 0, m.totalCount.Load())
+	// Size the pre-allocation after the CURRENT number of connections.
+	// totalCount is a cumulative counter that never decreases; using it
+	// here made every /api/connections request allocate a slice proportional
+	// to the process lifetime connection count (issue #2).
+	result := make([]ConnInfo, 0, m.activeCount.Load())
 	m.connections.Range(func(_, v interface{}) bool {
 		e := v.(*connEntry)
 		result = append(result, ConnInfo{

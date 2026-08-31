@@ -99,7 +99,7 @@ const dashboardHTML = `<!DOCTYPE html>
       <div class="sub"><span id="openCps">0</span>/s open · <span id="closeCps">0</span>/s close</div>
     </div>
     <div class="stat-card">
-      <div class="label">Total Connections</div>
+      <div class="label">Total Connections (cumulative)</div>
       <div class="value" id="totalConns">0</div>
       <div class="sub">opens: <span id="connOpenTotal">0</span> · closes: <span id="connCloseTotal">0</span></div>
     </div>

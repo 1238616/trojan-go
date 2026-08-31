@@ -1,6 +1,7 @@
 package connmonitor
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -194,5 +195,49 @@ func TestGlobalSingleton(t *testing.T) {
 	g2 := Global()
 	if g1 != g2 {
 		t.Fatal("Global() should return the same instance")
+	}
+}
+
+// TestGetAllAllocationDoesNotGrowWithTotalCount is a regression test for
+// issue #2. GetAll must size its pre-allocation after the CURRENT number of
+// connections, not after totalCount — a cumulative counter that never
+// decreases. Before the fix, a long-running process that had served many
+// connections allocated a slice proportional to the lifetime connection
+// count on every /api/connections request, even when only a handful of
+// connections were alive.
+func TestGetAllAllocationDoesNotGrowWithTotalCount(t *testing.T) {
+	m := NewMonitor()
+	defer m.Stop()
+
+	const total = 10000
+	entries := make([]*connEntry, 0, total)
+	for i := 0; i < total; i++ {
+		entries = append(entries, m.RegisterEntry(fmt.Sprintf("conn-%d", i), "example.com:443"))
+	}
+	for _, e := range entries {
+		m.UnregisterEntry(e)
+		// Backdate the scheduled deletion so calcLoop reaps the entry on
+		// its next tick instead of waiting the usual 10s grace period.
+		e.deleteAfter.Store(time.Now().UnixNano() - 1)
+	}
+
+	// Wait for calcLoop to reap the closed entries.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(m.GetAll()) == 0 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if got := m.totalCount.Load(); got != int64(total) {
+		t.Fatalf("expected totalCount %d, got %d", total, got)
+	}
+	all := m.GetAll()
+	if len(all) != 0 {
+		t.Fatalf("expected no tracked connections after reap, got %d", len(all))
+	}
+	if cap(all) > 100 {
+		t.Fatalf("GetAll pre-allocation still grows with cumulative totalCount: cap=%d", cap(all))
 	}
 }
