@@ -215,28 +215,27 @@ func (s *Server) checkKeyPairLoop(checkRate time.Duration, keyPath string, certP
 
 	for {
 		log.Debug("checking cert...")
-		keyBytes, err := ioutil.ReadFile(keyPath)
-		if err != nil {
-			log.Error(common.NewError("tls failed to check key").Base(err))
-			continue
-		}
-		certBytes, err := ioutil.ReadFile(certPath)
-		if err != nil {
-			log.Error(common.NewError("tls failed to check cert").Base(err))
-			continue
-		}
-		if !bytes.Equal(keyBytes, lastKeyBytes) || !bytes.Equal(lastCertBytes, certBytes) {
+		// Read failures must NOT skip the ticker wait below, otherwise a
+		// missing/unreadable cert file turns this loop into a busy spin.
+		keyBytes, keyErr := ioutil.ReadFile(keyPath)
+		certBytes, certErr := ioutil.ReadFile(certPath)
+		switch {
+		case keyErr != nil:
+			log.Error(common.NewError("tls failed to check key").Base(keyErr))
+		case certErr != nil:
+			log.Error(common.NewError("tls failed to check cert").Base(certErr))
+		case !bytes.Equal(keyBytes, lastKeyBytes) || !bytes.Equal(lastCertBytes, certBytes):
 			log.Info("new key pair detected")
 			keyPair, err := loadKeyPair(keyPath, certPath, password)
 			if err != nil {
 				log.Error(common.NewError("tls failed to load new key pair").Base(err))
-				continue
+			} else {
+				s.keyPairLock.Lock()
+				s.keyPair = []tls.Certificate{*keyPair}
+				s.keyPairLock.Unlock()
+				lastKeyBytes = keyBytes
+				lastCertBytes = certBytes
 			}
-			s.keyPairLock.Lock()
-			s.keyPair = []tls.Certificate{*keyPair}
-			s.keyPairLock.Unlock()
-			lastKeyBytes = keyBytes
-			lastCertBytes = certBytes
 		}
 
 		select {
@@ -258,22 +257,26 @@ func loadKeyPair(keyPath string, certPath string, password string) (*tls.Certifi
 		}
 		keyBlock, _ := pem.Decode(keyFile)
 		if keyBlock == nil {
-			return nil, common.NewError("failed to decode key file").Base(err)
+			return nil, common.NewError("failed to decode key file: no PEM data found")
 		}
 		decryptedKey, err := x509.DecryptPEMBlock(keyBlock, []byte(password))
-		if err == nil {
+		if err != nil {
 			return nil, common.NewError("failed to decrypt key").Base(err)
 		}
 
 		certFile, err := ioutil.ReadFile(certPath)
-		certBlock, _ := pem.Decode(certFile)
-		if certBlock == nil {
-			return nil, common.NewError("failed to decode cert file").Base(err)
+		if err != nil {
+			return nil, common.NewError("failed to load cert file").Base(err)
 		}
 
-		keyPair, err := tls.X509KeyPair(certBlock.Bytes, decryptedKey)
+		// tls.X509KeyPair expects PEM input on both sides. DecryptPEMBlock
+		// returns raw DER, so re-wrap it in a PEM block (keeping the original
+		// type, e.g. "RSA PRIVATE KEY" or "PRIVATE KEY") before handing it
+		// over.
+		keyPEM := pem.EncodeToMemory(&pem.Block{Type: keyBlock.Type, Bytes: decryptedKey})
+		keyPair, err := tls.X509KeyPair(certFile, keyPEM)
 		if err != nil {
-			return nil, err
+			return nil, common.NewError("failed to load decrypted key pair").Base(err)
 		}
 		keyPair.Leaf, err = x509.ParseCertificate(keyPair.Certificate[0])
 		if err != nil {

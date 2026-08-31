@@ -2,6 +2,9 @@ package tls
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"net"
 	"os"
 	"sync"
@@ -354,6 +357,75 @@ func TestUTLSECC(t *testing.T) {
 		s.Close()
 		c.Close()
 	}
+}
+
+// writeEncryptedRSAKeyPair writes the shared RSA2048 cert alongside a copy
+// of its key encrypted with the legacy PEM encryption scheme, and returns
+// the password used.
+func writeEncryptedRSAKeyPair(t *testing.T) (certPath, keyPath, password string) {
+	t.Helper()
+	password = "passw0rd"
+	certPath = "server-enc.crt"
+	keyPath = "server-enc.key"
+	common.Must(os.WriteFile(certPath, []byte(rsa2048Cert), 0o777))
+	block, _ := pem.Decode([]byte(rsa2048Key))
+	if block == nil {
+		t.Fatal("failed to decode embedded test key")
+	}
+	encBlock, err := x509.EncryptPEMBlock(rand.Reader, block.Type, block.Bytes, []byte(password), x509.PEMCipherAES256)
+	common.Must(err)
+	common.Must(os.WriteFile(keyPath, pem.EncodeToMemory(encBlock), 0o777))
+	return certPath, keyPath, password
+}
+
+func TestLoadKeyPairEncryptedKey(t *testing.T) {
+	certPath, keyPath, password := writeEncryptedRSAKeyPair(t)
+
+	// Correct password: loads and parses successfully.
+	cert, err := loadKeyPair(keyPath, certPath, password)
+	common.Must(err)
+	if cert == nil || cert.Leaf == nil {
+		t.Fatal("expected a certificate with a parsed leaf")
+	}
+
+	// Wrong password: must fail with an error.
+	if _, err := loadKeyPair(keyPath, certPath, "wrong-password"); err == nil {
+		t.Fatal("expected an error when decrypting with the wrong password")
+	}
+
+	// Empty password against an encrypted key: must also fail.
+	if _, err := loadKeyPair(keyPath, certPath, ""); err == nil {
+		t.Fatal("expected an error when the password is empty for an encrypted key")
+	}
+}
+
+func TestServerStartWithEncryptedKey(t *testing.T) {
+	certPath, keyPath, password := writeEncryptedRSAKeyPair(t)
+	serverCfg := &Config{
+		TLS: TLSConfig{
+			VerifyHostName: true,
+			CertCheckRate:  1,
+			KeyPath:        keyPath,
+			CertPath:       certPath,
+			KeyPassword:    password,
+		},
+	}
+	sctx := config.WithConfig(context.Background(), Name, serverCfg)
+
+	port := common.PickPort("tcp", "127.0.0.1")
+	transportConfig := &transport.Config{
+		LocalHost:  "127.0.0.1",
+		LocalPort:  port,
+		RemoteHost: "127.0.0.1",
+		RemotePort: port,
+	}
+	ctx := config.WithConfig(context.Background(), transport.Name, transportConfig)
+	ctx = config.WithConfig(ctx, freedom.Name, &freedom.Config{})
+	tcpServer, err := transport.NewServer(ctx, nil)
+	common.Must(err)
+	s, err := NewServer(sctx, tcpServer)
+	common.Must(err)
+	s.Close()
 }
 
 func TestMatch(t *testing.T) {
