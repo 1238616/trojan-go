@@ -38,3 +38,21 @@ func (c *Client) controlHook(network, address string, conn syscall.RawConn) erro
 	})
 	return opErr
 }
+
+// applyKeepalive sets aggressive TCP keepalive parameters on an established
+// connection. Linux only; other platforms get a no-op (keepalive_other.go).
+// Errors are ignored: keepalive tuning is best-effort and the constants are
+// valid on every Linux kernel trojan-go supports.
+func (c *Client) applyKeepalive(conn syscall.RawConn) {
+	conn.Control(func(fd uintptr) {
+		if c.keepIdleSec > 0 {
+			syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPIDLE, c.keepIdleSec)
+		}
+		if c.keepIntvlSec > 0 {
+			syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPINTVL, c.keepIntvlSec)
+		}
+		if c.keepCnt > 0 {
+			syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_KEEPCNT, c.keepCnt)
+		}
+	})
+}

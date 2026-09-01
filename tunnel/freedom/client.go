@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net"
 	"os"
-	"runtime"
 	"syscall"
 	"time"
 
@@ -237,23 +236,14 @@ func (c *Client) DialConn(addr *tunnel.Address, _ tunnel.Tunnel) (tunnel.Conn, e
 		tcpConn.(*net.TCPConn).SetWriteBuffer(c.writeBuffer)
 	}
 
-	// Phase 4: aggressive keepalive via syscall (Linux only).
-	if c.keepAlive && runtime.GOOS == "linux" {
+	// Phase 4: aggressive keepalive via syscall. The socket options are
+	// Linux-only; applyKeepalive is a no-op on other platforms
+	// (keepalive_other.go), which also keeps this file free of
+	// platform-specific syscall signatures (issue #14: Windows
+	// cross-compilation used to break here).
+	if c.keepAlive {
 		if raw, err := tcpConn.(*net.TCPConn).SyscallConn(); err == nil {
-			raw.Control(func(fd uintptr) {
-				if c.keepIdleSec > 0 {
-					// TCP_KEEPIDLE = 4
-					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, 4, c.keepIdleSec)
-				}
-				if c.keepIntvlSec > 0 {
-					// TCP_KEEPINTVL = 5
-					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, 5, c.keepIntvlSec)
-				}
-				if c.keepCnt > 0 {
-					// TCP_KEEPCNT = 6
-					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, 6, c.keepCnt)
-				}
-			})
+			c.applyKeepalive(raw)
 		}
 	}
 	return &Conn{
