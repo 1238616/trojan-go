@@ -1,6 +1,7 @@
 NAME := trojan-go
 PACKAGE_NAME := github.com/p4gefau1t/trojan-go
-VERSION := `git describe --dirty`
+# --tags: release tags created by `gh release create` are lightweight
+VERSION := `git describe --tags --dirty`
 COMMIT := `git rev-parse HEAD`
 
 PLATFORM := linux
