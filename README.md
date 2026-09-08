@@ -4,7 +4,7 @@
 
 Trojan-Go 支持[多路复用](#多路复用)提升并发性能；使用[路由模块](#路由模块)实现国内外分流；支持 [CDN 流量中转](#Websocket)(基于 WebSocket over TLS)；支持使用 AEAD 对 Trojan 流量进行[二次加密](#aead-加密)(基于 Shadowsocks AEAD)；支持可插拔的[传输层插件](#传输层插件)，允许替换 TLS，使用其他加密隧道传输 Trojan 协议流量。
 
-预编译二进制可执行文件可在 [Release 页面](https://github.com/1238616/trojan-go/releases)下载（当前最新版本 **[v1.0.1](https://github.com/1238616/trojan-go/releases/tag/v1.0.1)**，提供 linux/amd64、linux/arm64、darwin/amd64、darwin/arm64、windows/amd64 五个平台的静态链接二进制）。解压后即可直接运行，无其他组件依赖。
+预编译二进制可执行文件可在 [Release 页面](https://github.com/1238616/trojan-go/releases)下载（当前最新版本 **[v1.0.2](https://github.com/1238616/trojan-go/releases/tag/v1.0.2)**，提供 linux/amd64、linux/arm64、darwin/amd64、darwin/arm64、windows/amd64 五个平台的静态链接二进制）。解压后即可直接运行，无其他组件依赖。
 
 如遇到配置和使用问题、发现 bug，或是有更好的想法，欢迎加入 [Telegram 交流反馈群](https://t.me/trojan_go_chat)。
 
@@ -834,6 +834,7 @@ Mux:      开启
 
 | 版本 | 发布日期 | 说明 |
 |------|----------|------|
+| [v1.0.2](https://github.com/1238616/trojan-go/releases/tag/v1.0.2) | 2026-09-08 | 集群转发第二轮审查修复：#18–#23（紧急回退门控与死连接校验、mux 握手单飞重构、IPv6 拨号地址、状态管理竞态、本地/私网目标豁免、指标与协议头健壮性）+ 22 个回归测试，5 平台预编译二进制 |
 | [v1.0.1](https://github.com/1238616/trojan-go/releases/tag/v1.0.1) | 2026-09-01 | fork 首个正式发布：包含 #1–#16 全部修复（中继正确性、集群路由、监控面板、性能优化、依赖升级与 Go 1.25.13 工具链），5 平台预编译二进制（`CGO_ENABLED=0` 静态链接，`-tags "full"`） |
 
 ### Go 版本要求
