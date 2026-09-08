@@ -30,6 +30,11 @@ const (
 	// is kept before being torn down.
 	muxIdleTimeout = 60 * time.Second
 
+	// muxBuildWaitSlack is extra time a waiter on an in-flight session
+	// build allows beyond its own timeout before giving up and falling
+	// back to a dedicated connection (issue #19).
+	muxBuildWaitSlack = 2 * time.Second
+
 	// muxDefaultConcurrency is the default max number of streams shared
 	// over one peer mux session.
 	muxDefaultConcurrency = 8
@@ -78,8 +83,12 @@ type PeerDialer struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// muxMu guards muxSessions and muxBuilding. It must never be held
+	// across a network handshake: concurrent relays and probes on this
+	// peer otherwise serialize behind the slowest build (issue #19).
 	muxMu       sync.Mutex
 	muxSessions []*peerMuxSession
+	muxBuilding *muxBuild // in-flight session build, nil when idle
 }
 
 // peerMuxSession is one smux session over a full trojan tunnel to the peer.
@@ -87,6 +96,17 @@ type peerMuxSession struct {
 	session    *smux.Session
 	conn       net.Conn
 	lastActive time.Time
+}
+
+// muxBuild is the single-flight placeholder for an in-progress session
+// handshake (issue #19). The builder publishes it under muxMu, runs the
+// handshake with the mutex released, then records the result and closes
+// done. Waiters select on done instead of blocking the mutex, and a failed
+// build propagates to every waiter so they fall back to dedicated
+// connections in parallel.
+type muxBuild struct {
+	done chan struct{}
+	err  error // valid after done is closed
 }
 
 func NewPeerDialer(ctx context.Context, peer PeerConfig) (*PeerDialer, error) {
@@ -261,9 +281,14 @@ func (pd *PeerDialer) dialMuxStream(addr *tunnel.Address, timeout time.Duration)
 // openMuxStream returns a fresh stream on a session below the concurrency
 // cap, creating a new session when needed. Closed and idle sessions are
 // reaped on the way.
+//
+// The session handshake never runs under muxMu (issue #19): the first
+// caller needing a new session publishes a muxBuild placeholder and dials
+// with the mutex released, while concurrent callers either reuse an
+// existing session with capacity or wait on the in-flight build instead of
+// queueing behind the lock or starting duplicate handshakes.
 func (pd *PeerDialer) openMuxStream(timeout time.Duration) (*smux.Stream, error) {
 	pd.muxMu.Lock()
-	defer pd.muxMu.Unlock()
 
 	now := time.Now()
 
@@ -290,24 +315,67 @@ func (pd *PeerDialer) openMuxStream(timeout time.Duration) (*smux.Stream, error)
 				continue
 			}
 			s.lastActive = now
+			pd.muxMu.Unlock()
 			return stream, nil
 		}
 	}
 
-	// All sessions at capacity — establish a new one.
+	// No session with capacity. If a build is already in flight, wait on
+	// it instead of blocking the mutex or starting a duplicate handshake.
+	if b := pd.muxBuilding; b != nil {
+		pd.muxMu.Unlock()
+		waitTimer := time.NewTimer(timeout + muxBuildWaitSlack)
+		defer waitTimer.Stop()
+		select {
+		case <-b.done:
+			if b.err != nil {
+				// Build failed for everyone — propagate so each waiter
+				// falls back to a dedicated connection in parallel.
+				return nil, b.err
+			}
+			// Session published — retry to grab a stream on it.
+			return pd.openMuxStream(timeout)
+		case <-waitTimer.C:
+			return nil, fmt.Errorf("peer %s: timed out waiting for mux session build", pd.name)
+		case <-pd.ctx.Done():
+			return nil, pd.ctx.Err()
+		}
+	}
+
+	// All sessions at capacity — become the builder: publish the
+	// placeholder, release the lock, run the handshake outside it.
+	b := &muxBuild{done: make(chan struct{})}
+	pd.muxBuilding = b
+	pd.muxMu.Unlock()
+
 	sess, conn, err := pd.newMuxSession(timeout)
+
+	pd.muxMu.Lock()
+	pd.muxBuilding = nil
+	if err == nil {
+		if pd.ctx.Err() != nil {
+			// Dialer closed while the build was in flight — Close() has
+			// already swept muxSessions, so don't publish behind its back.
+			sess.Close()
+			conn.Close()
+			err = pd.ctx.Err()
+		} else {
+			pd.muxSessions = append(pd.muxSessions, &peerMuxSession{
+				session: sess, conn: conn, lastActive: time.Now(),
+			})
+		}
+	}
+	pd.muxMu.Unlock()
+
+	b.err = err
+	close(b.done)
+
 	if err != nil {
 		return nil, err
 	}
-	info := &peerMuxSession{session: sess, conn: conn, lastActive: now}
-	stream, err := sess.OpenStream()
-	if err != nil {
-		sess.Close()
-		conn.Close()
-		return nil, fmt.Errorf("peer %s: open first mux stream: %w", pd.name, err)
-	}
-	pd.muxSessions = append(pd.muxSessions, info)
-	return stream, nil
+	// Grab the first stream on the freshly published session; the retry
+	// also re-checks capacity in case waiters raced us to it.
+	return pd.openMuxStream(timeout)
 }
 
 // newMuxSession builds one full tunnel to the peer and upgrades it to an
