@@ -205,6 +205,10 @@ func (cr *ClusterRouter) Start() {
 	if cr.ctx != nil {
 		go cr.negCacheSweepLoop()
 	}
+	// Make the UDP limitation explicit at startup instead of leaving
+	// operators to discover it: only TCP connections are ever relayed
+	// (issue #22).
+	log.Warn("cluster: UDP is NOT relayed — packet connections always go direct from the local node, even in force_relay mode")
 	log.Info("cluster: router started")
 }
 
@@ -307,6 +311,30 @@ func (cr *ClusterRouter) fastestPeerForAddr(addr *tunnel.Address) string {
 	return ""
 }
 
+// isLocalTarget reports whether addr points at the local node's own
+// network neighborhood: loopback, private (RFC1918/ULA), link-local or
+// unspecified addresses. Such targets must never be relayed — a peer
+// dialing "127.0.0.1" or "192.168.x.x" reaches ITS OWN neighborhood, not
+// ours, silently redirecting intranet traffic to a foreign network
+// (issue #22). Domains are judged by their cached resolution; an
+// unresolvable domain is not treated as local.
+func isLocalTarget(addr *tunnel.Address) bool {
+	if addr.DomainName == muxMagicDomain {
+		return false
+	}
+	ip := addr.IP
+	if ip == nil && addr.DomainName != "" {
+		if s := resolveTargetIP(addr.DomainName); s != "" {
+			ip = net.ParseIP(s)
+		}
+	}
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+}
+
 // DialConn is the core decision function.
 // Returns (conn, peerName, nil) if relay is beneficial.
 // Returns (nil, "local", nil) if local direct is optimal.
@@ -316,12 +344,6 @@ func (cr *ClusterRouter) DialConn(addr *tunnel.Address) (net.Conn, string, error
 		return nil, "local", nil
 	}
 
-	// ForceRelay: route ALL outbound through the fastest available peer,
-	// skipping matcher and local RTT comparison entirely.
-	if cr.cfg != nil && cr.cfg.ForceRelay {
-		return cr.dialForceRelay(addr)
-	}
-
 	// Resolve a domain target once, before any decision layer runs, and
 	// write the result back onto the address (issue #4). Everything
 	// downstream — matcher, route-table lookup, emergency fallback and the
@@ -329,10 +351,28 @@ func (cr *ClusterRouter) DialConn(addr *tunnel.Address) (net.Conn, string, error
 	// the shared 30s cache plus this write-back keep the per-connection
 	// resolver cost at most one lookup, and the trojan header still carries
 	// the original domain because AddressType is left untouched.
+	// Resolution runs before ForceRelay too (issue #22): the local-target
+	// exemption below judges domains by IP, and the force-relay path
+	// previously skipped the write-back entirely.
 	if addr.AddressType == tunnel.DomainName && addr.IP == nil && addr.DomainName != "" {
 		if ipStr := resolveTargetIP(addr.DomainName); ipStr != "" {
 			addr.IP = net.ParseIP(ipStr)
 		}
+	}
+
+	// Never relay local/private/link-local targets (issue #22) — checked
+	// before ForceRelay so even "route ALL outbound" mode cannot leak
+	// intranet traffic to a peer.
+	if isLocalTarget(addr) {
+		log.DebugKV("cluster: local/private target exempt from relay",
+			"target", addr.String())
+		return nil, "local", nil
+	}
+
+	// ForceRelay: route ALL outbound through the fastest available peer,
+	// skipping matcher and local RTT comparison entirely.
+	if cr.cfg != nil && cr.cfg.ForceRelay {
+		return cr.dialForceRelay(addr)
 	}
 
 	// Check if target is in cluster-managed range.
@@ -458,6 +498,12 @@ func (cr *ClusterRouter) dialForceRelay(addr *tunnel.Address) (net.Conn, string,
 func (cr *ClusterRouter) DialAnyPeer(addr *tunnel.Address) (net.Conn, string, error) {
 	if cr == nil || !cr.enabled {
 		return nil, "", fmt.Errorf("cluster router not enabled")
+	}
+
+	// Never fan out peer handshakes for local/private targets (issue #22):
+	// a peer would dial its own neighborhood, not ours.
+	if isLocalTarget(addr) {
+		return nil, "", fmt.Errorf("cluster: target %s is local/private, peer relay refused", addrKey(addr))
 	}
 
 	// Negative cache: if a previous emergency fallback for this exact
