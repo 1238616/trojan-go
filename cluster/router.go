@@ -45,6 +45,61 @@ func (tc *trackedConn) Close() error {
 // handshakes.
 const fallbackNegCacheTTL = 10 * time.Second
 
+// fallbackPeerDialTimeout bounds each per-peer dial attempt inside
+// DialAnyPeer. The regular relay path uses the dialer default (10s), but
+// the emergency fallback runs serially over every candidate on a
+// user-facing connection that already sat through a failed local dial;
+// 10s per peer multiplies into tens of seconds before the last candidate
+// is even tried (issue #18).
+const fallbackPeerDialTimeout = 3 * time.Second
+
+// fallbackLivenessWait is how long DialAnyPeer listens on a freshly
+// dialed peer conn for a dead-on-arrival signal (immediate EOF/RST)
+// before accepting it as a successful relay. The peer tunnel handshake
+// succeeding does not mean the peer reached the target — dialDedicated
+// returns right after writing the trojan header, and a peer whose
+// outbound dial failed closes the tunnel almost immediately (issue #18).
+const fallbackLivenessWait = 1 * time.Second
+
+// prefixConn is a net.Conn that first yields bytes already consumed from
+// the underlying conn (e.g. by the liveness probe) before passing reads
+// through, so verification never eats user data.
+type prefixConn struct {
+	net.Conn
+	prefix []byte
+}
+
+func (c *prefixConn) Read(p []byte) (int, error) {
+	if len(c.prefix) > 0 {
+		n := copy(p, c.prefix)
+		c.prefix = c.prefix[n:]
+		return n, nil
+	}
+	return c.Conn.Read(p)
+}
+
+// verifyFallbackConn waits briefly on a freshly established peer conn for
+// a dead-on-arrival signal. A read timeout means no failure signal
+// arrived — the conn is considered alive. An immediate EOF/RST means the
+// peer could not reach the target; the conn is closed and an error is
+// returned so the caller falls through to the next candidate. Any byte
+// actually read is preserved via prefixConn.
+func verifyFallbackConn(conn net.Conn, wait time.Duration) (net.Conn, error) {
+	conn.SetReadDeadline(time.Now().Add(wait))
+	buf := make([]byte, 1)
+	n, err := conn.Read(buf)
+	// Clear the probe deadline before handing the conn to the data phase.
+	conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			return conn, nil
+		}
+		conn.Close()
+		return nil, fmt.Errorf("peer conn closed before use: %w", err)
+	}
+	return &prefixConn{Conn: conn, prefix: buf[:n]}, nil
+}
+
 // ClusterRouter is the decision engine that intercepts outbound connections
 // and routes them through optimal peers when beneficial.
 type ClusterRouter struct {
@@ -406,7 +461,15 @@ func (cr *ClusterRouter) DialAnyPeer(addr *tunnel.Address) (net.Conn, string, er
 		if !ok {
 			continue
 		}
-		conn, err := dialer.DialConn(addr)
+		// Bound each attempt (issue #18): the serial loop must not spend
+		// the dialer's full 10s handshake budget per peer.
+		conn, err := dialer.DialConnWithTimeout(addr, fallbackPeerDialTimeout)
+		if err == nil {
+			// A completed tunnel handshake is not proof the peer reached
+			// the target — verify the conn is not dead on arrival before
+			// counting this relay as successful (issue #18).
+			conn, err = verifyFallbackConn(conn, fallbackLivenessWait)
+		}
 		if err != nil {
 			cr.metrics.RecordRelayFallback(name)
 			log.DebugKV("cluster: emergency fallback peer dial failed",

@@ -117,35 +117,41 @@ func (p *Proxy) relayConnLoop() {
 						dialRTT := time.Since(dialStart)
 						fellBackToPeer := false
 						if err != nil {
-							// Only register as blocked/slow target when the
-							// failure looks like a timeout (SYN dropped, i.e.
-							// likely blocked) — not on connection refused or
-							// DNS failure, where the target is simply down
-							// and relaying through a peer can't help.
-							// dialFailed=true marks local unreachable in the
-							// route table so the next connection can relay
-							// through a peer without waiting for a probe cycle.
-							if p.clusterRouter != nil && isTimeoutLikeDial(err, dialRTT, p.fallbackSlowDial) {
+							// Only treat the failure as relay-worthy when it
+							// looks like a timeout (SYN dropped, i.e. likely
+							// blocked) — not on connection refused or DNS
+							// failure, where the target is simply down and
+							// relaying through a peer can't help. Classify
+							// once and gate BOTH the route-table update and
+							// the emergency fallback on it: an ungated
+							// DialAnyPeer burned a full peer-handshake
+							// fan-out per connection for plainly dead
+							// targets (issue #18).
+							timeoutLike := isTimeoutLikeDial(err, dialRTT, p.fallbackSlowDial)
+							if p.clusterRouter != nil && timeoutLike {
 								addr := inbound.Metadata().Address
 								host := addr.DomainName
 								if host == "" && addr.IP != nil {
 									host = addr.IP.String()
 								}
 								if host != "" && !isMuxMagicDomain(host) {
+									// dialFailed=true marks local unreachable in
+									// the route table so the next connection can
+									// relay through a peer without waiting for a
+									// probe cycle.
 									p.clusterRouter.RegisterSlowTarget(host, addr.Port, dialRTT, true)
 								}
-							}
-							// Emergency fallback: route the in-flight connection
-							// through any alive peer so it isn't dropped while
-							// the urgent probe rebuilds the route table.
-							if p.clusterRouter != nil {
-								if relayConn, peerName, perr := p.clusterRouter.DialAnyPeer(inbound.Metadata().Address); perr == nil && relayConn != nil {
+								// Emergency fallback: route the in-flight
+								// connection through any alive peer so it isn't
+								// dropped while the urgent probe rebuilds the
+								// route table.
+								if relayConn, peerName, perr := p.clusterRouter.DialAnyPeer(addr); perr == nil && relayConn != nil {
 									log.InfoKV("proxy: emergency peer fallback after local dial failure",
 										"target", target,
 										"peer", peerName,
 										"local_dial_err", err.Error(),
 										"local_dial_ms", dialRTT.Milliseconds())
-									outbound = &clusterConn{Conn: relayConn, addr: inbound.Metadata().Address}
+									outbound = &clusterConn{Conn: relayConn, addr: addr}
 									exitNode = peerName
 									err = nil
 									fellBackToPeer = true

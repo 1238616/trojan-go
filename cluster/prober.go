@@ -307,27 +307,37 @@ func (p *Prober) RegisterSlowTarget(host string, port int, dialRTT time.Duration
 		log.InfoKV("cluster: local dial failed, local marked unreachable",
 			"host", host, "port", port,
 			"dial_rtt_ms", dialRTT.Milliseconds())
-		if isNew {
-			// Bound the urgent-probe fan-out: a burst of newly blocked
-			// targets must not spawn an unbounded number of tunnel probes.
-			select {
-			case p.urgentSem <- struct{}{}:
-				go func() {
-					defer func() { <-p.urgentSem }()
-					p.probeTargetAllPeers(ProbeTarget{Host: host, Port: port})
-				}()
-			default:
-				log.DebugKV("cluster: urgent probe deferred (probe slots busy)",
-					"host", host, "port", port)
-			}
-		}
-		return
+	} else {
+		// Slow but successful: publish the measured local RTT. BestExit
+		// needs a local entry to compare against peer measurements —
+		// without one it stays blind to this target until the next full
+		// probe cycle, even after the urgent probe below has measured
+		// every peer (issue #18). Subsequent probe cycles refresh this
+		// entry with probeDirect measurements as usual.
+		p.routeTable.Update(key, p.localName, dialRTT)
+		log.DebugKV("cluster: slow target registered",
+			"host", host, "port", port,
+			"dial_rtt_ms", dialRTT.Milliseconds(),
+			"threshold_ms", p.latencyThreshold.Milliseconds())
 	}
 
-	log.DebugKV("cluster: slow target registered",
-		"host", host, "port", port,
-		"dial_rtt_ms", dialRTT.Milliseconds(),
-		"threshold_ms", p.latencyThreshold.Milliseconds())
+	if isNew {
+		// Urgent-probe every newly registered target, whether it failed
+		// or was merely slow: both mean the next connection could benefit
+		// from fresh peer measurements right now instead of up to a full
+		// probe interval later (issue #18). Bound the fan-out so a burst
+		// of new targets cannot spawn unbounded tunnel probes.
+		select {
+		case p.urgentSem <- struct{}{}:
+			go func() {
+				defer func() { <-p.urgentSem }()
+				p.probeTargetAllPeers(ProbeTarget{Host: host, Port: port})
+			}()
+		default:
+			log.DebugKV("cluster: urgent probe deferred (probe slots busy)",
+				"host", host, "port", port)
+		}
+	}
 }
 
 // DynamicTargetCount returns the number of dynamically registered targets.
