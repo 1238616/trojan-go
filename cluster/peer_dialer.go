@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -42,6 +43,13 @@ const (
 	cmdConnect byte = 0x01
 	cmdMux     byte = 0x7f
 )
+
+// peerDialAddr formats a "host:port" dial address, bracketing IPv6
+// literals as net.Dial requires (issue #20). fmt.Sprintf("%s:%d") produced
+// "2001:db8::1:443" for IPv6 hosts, which every dialer rejects.
+func peerDialAddr(host string, port int) string {
+	return net.JoinHostPort(host, strconv.Itoa(port))
+}
 
 // PeerDialer encapsulates a connection to a peer node using the full
 // tunnel stack: TCP → TLS → WebSocket → Trojan protocol.
@@ -188,7 +196,7 @@ func (pd *PeerDialer) dialDedicated(addr *tunnel.Address, timeout time.Duration)
 // and the TLS handshake; the conn deadline additionally bounds the WS
 // upgrade, which the websocket helper does not make cancellable.
 func (pd *PeerDialer) dialTransport(ctx context.Context, deadline time.Time) (net.Conn, error) {
-	dialAddr := fmt.Sprintf("%s:%d", pd.host, pd.port)
+	dialAddr := peerDialAddr(pd.host, pd.port)
 
 	// Step 1: TCP connect to peer
 	var d net.Dialer
@@ -382,7 +390,7 @@ func (pd *PeerDialer) ProbeWithTimeout(target ProbeTarget, timeout time.Duration
 // CheckAlive verifies connectivity to the peer (TCP+TLS+WS handshake only,
 // no Trojan header or target required). Returns RTT or -1 on failure.
 func (pd *PeerDialer) CheckAlive(timeout time.Duration) time.Duration {
-	dialAddr := fmt.Sprintf("%s:%d", pd.host, pd.port)
+	dialAddr := peerDialAddr(pd.host, pd.port)
 	start := time.Now()
 
 	tcpConn, err := net.DialTimeout("tcp", dialAddr, timeout)

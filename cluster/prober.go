@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -447,7 +446,7 @@ func (p *Prober) probeAll() {
 
 // probeDirect measures local TCP connect latency to target.
 func (p *Prober) probeDirect(target ProbeTarget) time.Duration {
-	addr := fmt.Sprintf("%s:%d", target.Host, target.Port)
+	addr := net.JoinHostPort(target.Host, strconv.Itoa(target.Port))
 	start := time.Now()
 	conn, err := net.DialTimeout("tcp", addr, p.timeout)
 	if err != nil {
