@@ -554,12 +554,22 @@ func (p *Prober) evictStaleTargets() {
 	cutoff := time.Now().Add(-30 * time.Minute)
 	p.dynamicTargets.Range(func(key, value interface{}) bool {
 		dt := value.(*DynamicTarget)
-		if dt.LastSeenAt.Before(cutoff) {
-			if _, loaded := p.dynamicTargets.LoadAndDelete(key); loaded {
-				atomic.AddInt32(&p.dynamicCount, -1)
-			}
+		if dt.LastSeenAt.Before(cutoff) && p.evictEntry(key, value) {
 			log.DebugKV("cluster: evicted stale probe target", "host", dt.Host)
 		}
 		return true
 	})
+}
+
+// evictEntry removes key only while the map still holds the exact entry
+// pointer the caller judged stale, keeping the count in step. A concurrent
+// RegisterSlowTarget publishes a refreshed copy under the same key; the old
+// blind LoadAndDelete threw that refresh away and decremented the count for
+// a live entry (issue #21). Returns whether anything was deleted.
+func (p *Prober) evictEntry(key, stale interface{}) bool {
+	if p.dynamicTargets.CompareAndDelete(key, stale) {
+		atomic.AddInt32(&p.dynamicCount, -1)
+		return true
+	}
+	return false
 }

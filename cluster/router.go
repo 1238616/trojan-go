@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/p4gefau1t/trojan-go/log"
@@ -103,6 +104,7 @@ func verifyFallbackConn(conn net.Conn, wait time.Duration) (net.Conn, error) {
 // ClusterRouter is the decision engine that intercepts outbound connections
 // and routes them through optimal peers when beneficial.
 type ClusterRouter struct {
+	ctx         context.Context
 	enabled     bool
 	routeTable  *RouteTable
 	prober      *Prober
@@ -118,15 +120,21 @@ type ClusterRouter struct {
 	fallbackNegCache sync.Map
 }
 
-// globalRouter is the singleton accessed by the HTTP API.
-var (
-	globalRouter     *ClusterRouter
-	globalRouterOnce sync.Once
-)
+// negCacheSweepInterval is how often the background sweeper drops expired
+// fallbackNegCache entries (issue #21).
+const negCacheSweepInterval = time.Minute
 
-// GlobalRouter returns the singleton ClusterRouter (may be nil if not enabled).
+// globalRouter is the singleton accessed by the HTTP API (httpapi.go reads
+// it from request goroutines). It is an atomic.Pointer because a plain
+// variable raced readers against the NewClusterRouter write, and the old
+// sync.Once silently refused to register a second router created later
+// (e.g. after a config reload) — last created wins now (issue #21).
+var globalRouter atomic.Pointer[ClusterRouter]
+
+// GlobalRouter returns the current singleton ClusterRouter (may be nil if
+// not enabled).
 func GlobalRouter() *ClusterRouter {
-	return globalRouter
+	return globalRouter.Load()
 }
 
 // NewClusterRouter creates and initializes the cluster routing system.
@@ -170,6 +178,7 @@ func NewClusterRouter(ctx context.Context, cfg *Config) (*ClusterRouter, error) 
 	prober := NewProber(ctx, cfg, routeTable, peerDialers, metrics)
 
 	cr := &ClusterRouter{
+		ctx:         ctx,
 		enabled:     true,
 		routeTable:  routeTable,
 		prober:      prober,
@@ -180,10 +189,9 @@ func NewClusterRouter(ctx context.Context, cfg *Config) (*ClusterRouter, error) 
 		cfg:         cfg,
 	}
 
-	// Set singleton
-	globalRouterOnce.Do(func() {
-		globalRouter = cr
-	})
+	// Publish as the current singleton (issue #21): last created wins so a
+	// router built after a config reload actually replaces the old one.
+	globalRouter.Store(cr)
 
 	return cr, nil
 }
@@ -194,6 +202,9 @@ func (cr *ClusterRouter) Start() {
 		return
 	}
 	cr.prober.Start()
+	if cr.ctx != nil {
+		go cr.negCacheSweepLoop()
+	}
 	log.Info("cluster: router started")
 }
 
@@ -202,11 +213,51 @@ func (cr *ClusterRouter) Stop() {
 	if cr == nil {
 		return
 	}
+	// Unregister the singleton only if it is still us: a newer router may
+	// already have replaced this one (issue #21).
+	globalRouter.CompareAndSwap(cr, nil)
 	cr.prober.Stop()
 	for _, d := range cr.peerDialers {
 		d.Close()
 	}
 	log.Info("cluster: router stopped")
+}
+
+// sweepExpiredNegCache drops negative-cache entries whose suppression
+// window has passed, returning how many were removed. CompareAndDelete
+// keeps the sweep from clobbering a fresh expiry stored concurrently by
+// DialAnyPeer for the same key (issue #21).
+func (cr *ClusterRouter) sweepExpiredNegCache() int {
+	now := time.Now()
+	swept := 0
+	cr.fallbackNegCache.Range(func(key, value interface{}) bool {
+		if expiry, ok := value.(time.Time); ok && now.After(expiry) {
+			if cr.fallbackNegCache.CompareAndDelete(key, value) {
+				swept++
+			}
+		}
+		return true
+	})
+	return swept
+}
+
+// negCacheSweepLoop periodically sweeps the fallback negative cache.
+// Without it, entries for targets that never reappear linger in the map
+// forever: expiry was only observed lazily when DialAnyPeer happened to be
+// called again for the same key (issue #21).
+func (cr *ClusterRouter) negCacheSweepLoop() {
+	ticker := time.NewTicker(negCacheSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-cr.ctx.Done():
+			return
+		case <-ticker.C:
+			if n := cr.sweepExpiredNegCache(); n > 0 {
+				log.Debugf("cluster: swept %d expired fallback negative-cache entries", n)
+			}
+		}
+	}
 }
 
 // lookupHosts returns the ordered route-table lookup keys for an address:
