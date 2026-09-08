@@ -524,7 +524,30 @@ func (pd *PeerDialer) writeTrojanHeader(conn net.Conn, addr *tunnel.Address) err
 
 // writeTrojanHeaderCmd writes the trojan protocol header with the given
 // command byte (cmdConnect for relays and probes, cmdMux for sessions).
+//
+// The address is validated before anything is written (issue #23): a
+// mismatched AddressType/IP made To4()/To16() return nil, buf.Write(nil)
+// emitted zero address bytes without error, and the peer then parsed the
+// port and CRLF at the wrong offsets — silent protocol corruption instead
+// of a clean dial failure.
 func (pd *PeerDialer) writeTrojanHeaderCmd(conn net.Conn, addr *tunnel.Address, cmd byte) error {
+	switch addr.AddressType {
+	case tunnel.IPv4:
+		if addr.IP.To4() == nil {
+			return fmt.Errorf("peer %s: trojan header: address type IPv4 but address %v is not a 4-byte IP", pd.name, addr.IP)
+		}
+	case tunnel.IPv6:
+		if addr.IP.To16() == nil {
+			return fmt.Errorf("peer %s: trojan header: address type IPv6 but address %v is not a valid IP", pd.name, addr.IP)
+		}
+	case tunnel.DomainName:
+		if n := len(addr.DomainName); n == 0 || n > 255 {
+			return fmt.Errorf("peer %s: trojan header: domain length %d outside 1..255", pd.name, n)
+		}
+	default:
+		return fmt.Errorf("peer %s: trojan header: unsupported address type %d", pd.name, addr.AddressType)
+	}
+
 	crlf := []byte{0x0d, 0x0a}
 	buf := bytes.NewBuffer(make([]byte, 0, 512))
 
@@ -539,8 +562,7 @@ func (pd *PeerDialer) writeTrojanHeaderCmd(conn net.Conn, addr *tunnel.Address, 
 	switch addr.AddressType {
 	case tunnel.IPv4:
 		buf.WriteByte(0x01) // ATYP IPv4
-		ip4 := addr.IP.To4()
-		buf.Write(ip4)
+		buf.Write(addr.IP.To4())
 	case tunnel.IPv6:
 		buf.WriteByte(0x04) // ATYP IPv6
 		buf.Write(addr.IP.To16())

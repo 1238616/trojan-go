@@ -456,7 +456,17 @@ func (p *Prober) probeAll() {
 
 // probeDirect measures local TCP connect latency to target.
 func (p *Prober) probeDirect(target ProbeTarget) time.Duration {
-	addr := net.JoinHostPort(target.Host, strconv.Itoa(target.Port))
+	// Resolve domain targets through the shared DNS cache instead of
+	// letting net.Dial do its own lookup (issue #23): every probe cycle
+	// re-resolved each domain outside the 30s cache and single-flight
+	// merging, and the lookup time leaked into the measured "connect" RTT.
+	// IPs pass through unchanged; on resolution failure the original host
+	// is kept so net.Dial can still try (and fail) on its own.
+	host := target.Host
+	if ipStr := resolveTargetIP(host); ipStr != "" {
+		host = ipStr
+	}
+	addr := net.JoinHostPort(host, strconv.Itoa(target.Port))
 	start := time.Now()
 	conn, err := net.DialTimeout("tcp", addr, p.timeout)
 	if err != nil {

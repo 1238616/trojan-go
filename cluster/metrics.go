@@ -11,15 +11,21 @@ type ClusterMetrics struct {
 	mu             sync.RWMutex
 	totalRelays    int64
 	totalFallbacks int64
-	totalGainMs    int64 // cumulative gain in milliseconds
+	totalGainMs    int64 // cumulative gain in milliseconds (measured-gain relays only)
+
+	// totalBypassRelays counts relays recorded with the unreachableGain
+	// sentinel: "local is unreachable, route around the block" decisions
+	// carry no measured latency gain, and averaging the 10s sentinel into
+	// totalGainMs inflated AvgGainMs by orders of magnitude (issue #23).
+	totalBypassRelays int64
 
 	// Per-peer relay counts
 	peerRelays      map[string]*int64
 	peerFallbacks   map[string]*int64
 	peerActiveConns map[string]*int64
 
-	lastProbeAt   time.Time
-	lastProbeDur  time.Duration
+	lastProbeAt  time.Time
+	lastProbeDur time.Duration
 }
 
 func NewClusterMetrics() *ClusterMetrics {
@@ -32,7 +38,14 @@ func NewClusterMetrics() *ClusterMetrics {
 
 func (m *ClusterMetrics) RecordRelay(peerName string, gain time.Duration) {
 	atomic.AddInt64(&m.totalRelays, 1)
-	atomic.AddInt64(&m.totalGainMs, gain.Milliseconds())
+	if gain >= unreachableGain {
+		// Block-bypass relay (sentinel gain): counted, but kept out of
+		// the latency-gain average — it was never a measured improvement
+		// (issue #23).
+		atomic.AddInt64(&m.totalBypassRelays, 1)
+	} else {
+		atomic.AddInt64(&m.totalGainMs, gain.Milliseconds())
+	}
 
 	m.mu.RLock()
 	counter, ok := m.peerRelays[peerName]
@@ -130,9 +143,13 @@ func (m *ClusterMetrics) Snapshot() ClusterStats {
 	defer m.mu.RUnlock()
 
 	relays := atomic.LoadInt64(&m.totalRelays)
+	bypass := atomic.LoadInt64(&m.totalBypassRelays)
 	var avgGain float64
-	if relays > 0 {
-		avgGain = float64(atomic.LoadInt64(&m.totalGainMs)) / float64(relays)
+	// Average over measured-gain relays only: bypass relays contributed
+	// nothing to totalGainMs, so including them in the denominator would
+	// drag the average toward zero (issue #23).
+	if gainful := relays - bypass; gainful > 0 {
+		avgGain = float64(atomic.LoadInt64(&m.totalGainMs)) / float64(gainful)
 	}
 
 	lastProbeAt := ""
@@ -143,6 +160,7 @@ func (m *ClusterMetrics) Snapshot() ClusterStats {
 	return ClusterStats{
 		TotalRelays:    relays,
 		TotalFallbacks: atomic.LoadInt64(&m.totalFallbacks),
+		BypassRelays:   bypass,
 		AvgGainMs:      avgGain,
 		LastProbeAt:    lastProbeAt,
 		LastProbeDurMs: float64(m.lastProbeDur.Microseconds()) / 1000.0,
@@ -198,6 +216,7 @@ type OptimizedRouteEntry struct {
 type ClusterStats struct {
 	TotalRelays    int64   `json:"total_relays"`
 	TotalFallbacks int64   `json:"total_fallbacks"`
+	BypassRelays   int64   `json:"bypass_relays"` // relays with sentinel (unreachable) gain, excluded from avg_gain_ms
 	AvgGainMs      float64 `json:"avg_gain_ms"`
 	ProbeTargets   int     `json:"probe_targets"`
 	StaticTargets  int     `json:"static_targets"`
