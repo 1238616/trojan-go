@@ -3,6 +3,10 @@ on:
     tags:
       - "v*.*.*"
 name: release-build
+# upload-release-action needs to create release assets; the repository default
+# workflow token is read-only, which silently failed every v1.0.x upload.
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,19 +24,55 @@ jobs:
       - name: Checkout tag
         run: |
           tag_name="${GITHUB_REF##*/}"
-          echo Tag $tag_name
-          git checkout $tag_name
-          echo "TAG_NAME=${tag_name}" >> $GITHUB_ENV
+          echo "Tag $tag_name"
+          git checkout "$tag_name"
 
       - name: Build
         run: |
           make release -j$(nproc)
 
+      - name: Verify package contents
+        run: |
+          shopt -s nullglob
+          zips=(./trojan-go-*.zip)
+          if [ "${#zips[@]}" -eq 0 ]; then
+            echo "no release zip produced"
+            exit 1
+          fi
+          status=0
+          for archive in "${zips[@]}"; do
+            listing="$(unzip -Z1 "$archive")"
+            for required in geoip.dat geosite.dat geoip-only-cn-private.dat \
+                example/client.json example/client.yaml \
+                example/server.json example/server.yaml \
+                example/trojan-go.service 'example/trojan-go@.service'; do
+              if ! grep -qxF "$required" <<<"$listing"; then
+                echo "$archive: missing $required"
+                status=1
+              fi
+            done
+            if ! grep -qE '^(trojan-go|trojan-go\.exe)$' <<<"$listing"; then
+              echo "$archive: missing executable"
+              status=1
+            fi
+          done
+          echo "packaged ${#zips[@]} archives"
+          exit $status
+
+      # Keeps the archives out of the discarded runner workspace if the upload fails.
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-zips
+          path: ./trojan-go-*.zip
+          if-no-files-found: error
+
       - name: Release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ env.TAG_NAME }}
+          tag: ${{ github.ref_name }}
           file: ./trojan-go-*.zip
           file_glob: true
-          prerelease: true
+          overwrite: true
+          prerelease: false

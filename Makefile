@@ -17,14 +17,19 @@ clean:
 	rm -f *.zip
 	rm -f *.dat
 
+# curl rather than wget: wget is absent on macOS, and downloading to a temporary
+# name keeps a failed fetch from leaving a target make considers up to date.
 geoip.dat:
-	wget https://github.com/v2fly/geoip/raw/release/geoip.dat
+	curl -fsSL -o $@.tmp https://github.com/v2fly/geoip/raw/release/geoip.dat
+	mv $@.tmp $@
 
 geoip-only-cn-private.dat:
-	wget https://github.com/v2fly/geoip/raw/release/geoip-only-cn-private.dat
+	curl -fsSL -o $@.tmp https://github.com/v2fly/geoip/raw/release/geoip-only-cn-private.dat
+	mv $@.tmp $@
 
 geosite.dat:
-	wget https://github.com/v2fly/domain-list-community/raw/release/dlc.dat -O geosite.dat
+	curl -fsSL -o $@.tmp https://github.com/v2fly/domain-list-community/raw/release/dlc.dat
+	mv $@.tmp $@
 
 test:
 	# Disable Bloomfilter when testing
@@ -60,10 +65,12 @@ uninstall:
 	rm /usr/bin/geoip-only-cn-private.dat
 	rm /usr/bin/geosite.dat
 
+# The build directory is reused across runs, so anything left in it would be
+# packaged into the release. Missing .dat must fail the build, not warn.
 %.zip: % geosite.dat geoip.dat geoip-only-cn-private.dat
-	@zip -du $(NAME)-$@ -j $(BUILD_DIR)/$</*
+	@zip -du $(NAME)-$@ -j $(BUILD_DIR)/$</* -x '*.zip' '*.DS_Store'
 	@zip -du $(NAME)-$@ example/*
-	@-zip -du $(NAME)-$@ *.dat
+	@zip -du $(NAME)-$@ *.dat
 	@echo "<<< ---- $(NAME)-$@"
 
 release: geosite.dat geoip.dat geoip-only-cn-private.dat darwin-amd64.zip darwin-arm64.zip linux-386.zip linux-amd64.zip \
